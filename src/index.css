@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", serif;
+  
+  --color-natural-bg: #F9F7F2;
+  --color-natural-text: #3E4238;
+  --color-natural-sidebar: #F1EDE4;
+  --color-natural-primary: #5A6B52;
+  --color-natural-secondary: #E5DACE;
+  --color-natural-border: #E5E0D5;
+  --color-natural-dark: #2D332A;
+}
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap');

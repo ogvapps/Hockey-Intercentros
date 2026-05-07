@@ -1,0 +1,93 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 0.1 Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 1. Settings Rules
+    match /app/settings {
+      allow read: if true;
+      allow write: if isAdmin() && isValidSettings(incoming());
+    }
+
+    function isValidSettings(data) {
+      return data.keys().hasAll(['title']) && 
+             data.keys().size() <= 3 &&
+             data.title is string && data.title.size() <= 100 &&
+             (!data.keys().contains('description') || (data.description is string && data.description.size() <= 500));
+    }
+
+    // 2. Teams Rules
+    match /teams/{teamId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidId(teamId) && isValidTeam(incoming());
+      allow update: if isAdmin() && isValidTeam(incoming());
+      allow delete: if isAdmin();
+    }
+
+    function isValidTeam(data) {
+      return data.keys().hasAll(['name', 'color', 'group', 'category']) &&
+             data.name is string && data.name.size() <= 60 &&
+             data.color is string && data.color.size() <= 20 &&
+             data.group in ['A', 'B'] &&
+             data.category in ['masculino', 'femenino'] &&
+             (!data.keys().contains('isRest') || data.isRest is bool);
+    }
+
+    // 3. Matches Rules
+    match /matches/{matchId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidId(matchId) && isValidMatch(incoming());
+      allow update: if isAdmin() && isValidMatch(incoming());
+      allow delete: if isAdmin();
+    }
+
+    function isValidMatch(data) {
+      return data.keys().hasAll(['team1', 'team2', 'category', 'time', 'round', 'group']) &&
+             data.team1 is string && data.team1.size() <= 60 &&
+             data.team2 is string && data.team2.size() <= 60 &&
+             data.category in ['masculino', 'femenino'] &&
+             data.time is string && data.time.size() <= 10 &&
+             data.round is int &&
+             data.group in ['A', 'B'] &&
+             (!data.keys().contains('score1') || data.score1 is int) &&
+             (!data.keys().contains('score2') || data.score2 is int) &&
+             (!data.keys().contains('isRestMatch') || data.isRestMatch is bool) &&
+             (!data.keys().contains('updatedAt') || data.updatedAt is timestamp);
+    }
+
+    // 4. Admin whitelist
+    match /admins/{userId} {
+      // Users can see if they are admin, but only admins can list all or write.
+      allow get: if isSignedIn() && request.auth.uid == userId;
+      allow list, write: if false; // Only manageable via Google Console for top-level bootstrap
+    }
+  }
+}

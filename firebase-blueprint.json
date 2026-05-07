@@ -1,0 +1,72 @@
+{
+  "entities": {
+    "Settings": {
+      "title": "Application Settings",
+      "description": "Global configuration for the tournament.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "The name of the tournament" },
+        "description": { "type": "string", "description": "Short description of the tournament" }
+      },
+      "required": ["title"]
+    },
+    "Team": {
+      "title": "Team",
+      "description": "A competing team in the tournament.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "color": { "type": "string" },
+        "group": { "type": "string", "enum": ["A", "B"] },
+        "category": { "type": "string", "enum": ["masculino", "femenino"] },
+        "isRest": { "type": "boolean" }
+      },
+      "required": ["name", "color", "group", "category"]
+    },
+    "Match": {
+      "title": "Match",
+      "description": "A match between two teams.",
+      "type": "object",
+      "properties": {
+        "team1": { "type": "string" },
+        "team2": { "type": "string" },
+        "score1": { "type": "integer" },
+        "score2": { "type": "integer" },
+        "category": { "type": "string" },
+        "time": { "type": "string" },
+        "round": { "type": "integer" },
+        "group": { "type": "string" },
+        "isRestMatch": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["team1", "team2", "category", "time", "round", "group"]
+    },
+    "Admin": {
+      "title": "Administrator",
+      "description": "Users with write permissions.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" }
+      },
+      "required": ["email"]
+    }
+  },
+  "firestore": {
+    "app/settings": {
+      "schema": "Settings",
+      "description": "Global settings document"
+    },
+    "teams/{teamId}": {
+      "schema": "Team",
+      "description": "Collection of all participating teams"
+    },
+    "matches/{matchId}": {
+      "schema": "Match",
+      "description": "Collection of all matches"
+    },
+    "admins/{userId}": {
+      "schema": "Admin",
+      "description": "Whitelisted administrator users"
+    }
+  }
+}
