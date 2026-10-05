@@ -29,6 +29,16 @@ export interface ScheduleMatch {
   isRestMatch: boolean;
 }
 
+export interface MatchEvent {
+  teamIndex: number;
+  time: number;
+  score: string;
+  type?: 'goal' | 'yellow' | 'red';
+  /** Points this entry is worth (basketball 2/3-pointers); 1 when absent. */
+  value?: number;
+}
+
+/** The match currently being refereed. Can be a new match or a stored MatchRecord. */
 export interface LiveMatchData {
   id: string | null;
   team1: string;
@@ -36,13 +46,18 @@ export interface LiveMatchData {
   score1: number;
   score2: number;
   category: 'masculino' | 'femenino';
-  time: string;
-  round: number;
-  group: string;
+  time?: string;
+  round?: number;
+  group?: string;
   yellowCards1?: number;
   yellowCards2?: number;
   redCards1?: number;
   redCards2?: number;
+  goalHistory?: MatchEvent[];
+  currentTime?: number;
+  timerRunning?: boolean;
+  isLive?: boolean;
+  played?: boolean;
 }
 
 export interface MatchRecord {
@@ -61,12 +76,7 @@ export interface MatchRecord {
   isLive?: boolean;
   currentTime?: number;
   timerRunning?: boolean;
-  goalHistory?: { 
-    teamIndex: number; 
-    time: number; 
-    score: string;
-    type?: 'goal' | 'yellow' | 'red';
-  }[];
+  goalHistory?: MatchEvent[];
   yellowCards1?: number;
   yellowCards2?: number;
   redCards1?: number;
@@ -76,7 +86,8 @@ export interface MatchRecord {
 
 export interface AppSettings {
   title: string;
-  matchDuration?: number;
+  matchDuration?: number;      // seconds
+  /** @deprecated PINs now live in /secrets; only read to remove it from old documents. */
   adminPin?: string;
   sportId?: string;          // from SPORTS
   tournamentName?: string;   // e.g. "Intercentros 2026"
@@ -85,6 +96,11 @@ export interface AppSettings {
   playoffFormat?: 'quarters' | 'semis' | 'direct_final'; // auto-determined
   format?: 'group-playoff' | 'league' | 'knockout';
   isArchived?: boolean;
+  startTime?: string;        // "HH:MM"
+  endTime?: string;          // "HH:MM"
+  restDuration?: number;     // minutes between matches
+  concurrentCourts?: number;
+  createdAt?: string;
 }
 
 export type Category = 'masculino' | 'femenino';

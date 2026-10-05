@@ -11,6 +11,8 @@ interface LiveMatchViewProps {
   time: number;
   timerRunning: boolean;
   isAdminUser: boolean;
+  /** Publishes the referee's clock so spectators can follow it. */
+  onSyncTimer?: (time: number, running: boolean) => void;
   activeCategory: Category;
   matchDuration: number;
   setTime: (t: number | ((prev: number) => number)) => void;
@@ -29,6 +31,7 @@ export const LiveMatchView: React.FC<LiveMatchViewProps> = ({
   time,
   timerRunning,
   isAdminUser,
+  onSyncTimer,
   activeCategory,
   matchDuration,
   setTime,
@@ -57,27 +60,31 @@ export const LiveMatchView: React.FC<LiveMatchViewProps> = ({
   const team2Color = findTeamColor(liveMatch.team2);
   const isMasculino = activeCategory === 'masculino';
 
+  // Spectators hear the horn when the synced clock reaches zero. The referee's
+  // own horn is played by useTimer, so it is not repeated here.
+  // Between syncs the spectator's clock counts down locally.
+  const [spectatorTime, setSpectatorTime] = React.useState(time);
+  React.useEffect(() => { setSpectatorTime(time); }, [time]);
   React.useEffect(() => {
-    if (time === 0) {
+    if (isAdminUser || !timerRunning) return;
+    const interval = setInterval(() => setSpectatorTime(t => (t > 0 ? t - 1 : 0)), 1000);
+    return () => clearInterval(interval);
+  }, [isAdminUser, timerRunning, time]);
+  const shownTime = isAdminUser ? time : spectatorTime;
+
+  const prevTimeRef = React.useRef(shownTime);
+  React.useEffect(() => {
+    if (!isAdminUser && prevTimeRef.current > 0 && shownTime === 0) {
       import('../utils/audio').then(m => m.playHorn());
     }
-    
-    if (isAdminUser && liveMatch.id) {
-      const syncTimer = async () => {
-        try {
-          const { doc, updateDoc, Timestamp } = await import('firebase/firestore');
-          const { db } = await import('../services/firebase');
-          await updateDoc(doc(db, 'matches', liveMatch.id as string), {
-            currentTime: time,
-            timerRunning: timerRunning,
-            updatedAt: Timestamp.now()
-          });
-        } catch (e) {}
-      };
+    prevTimeRef.current = shownTime;
+  }, [shownTime, isAdminUser]);
 
-      if (!timerRunning || time % 5 === 0 || time === 0) {
-        syncTimer();
-      }
+  // The referee publishes the clock every 5 s and on every start/pause.
+  React.useEffect(() => {
+    if (!isAdminUser || !liveMatch.id || !onSyncTimer) return;
+    if (!timerRunning || time % 5 === 0 || time === 0) {
+      onSyncTimer(time, timerRunning);
     }
   }, [time, timerRunning, isAdminUser, liveMatch.id]);
 
@@ -149,7 +156,7 @@ export const LiveMatchView: React.FC<LiveMatchViewProps> = ({
 
       {/* TOP: Timer Area */}
       <div className="shrink-0 flex flex-col items-center pt-2 md:pt-4 pb-2 md:pb-4 px-4 bg-[#1a1e1a] border-b border-white/5 shadow-2xl relative z-10">
-        <button
+        <button aria-label="Volver" title="Volver"
           onClick={handleExit}
           className="absolute left-4 top-1/2 -translate-y-1/2 bg-white/5 hover:bg-white/10 text-white/60 p-2 md:p-3 rounded-xl md:rounded-2xl transition-all border border-white/5"
         >
@@ -169,7 +176,7 @@ export const LiveMatchView: React.FC<LiveMatchViewProps> = ({
             onClick={() => isAdminUser && setIsTimerPromptOpen(true)}
             className="text-5xl md:text-7xl font-black italic text-white tabular-nums tracking-tighter leading-none cursor-pointer"
           >
-            {formatTime(time)}
+            {formatTime(shownTime)}
           </div>
         )}
 
@@ -186,7 +193,7 @@ export const LiveMatchView: React.FC<LiveMatchViewProps> = ({
                   {timerRunning ? <Pause className="w-3 h-3 md:w-4 md:h-4 fill-current" /> : <Play className="w-3 h-3 md:w-4 md:h-4 fill-current" />}
                   {timerRunning ? 'PAUSAR' : 'INICIAR'}
                 </button>
-                <button
+                <button aria-label="Reiniciar reloj" title="Reiniciar reloj"
                   onClick={() => { setTime(matchDuration); setTimerRunning(false); }}
                   className="p-2 md:p-3 rounded-xl md:rounded-2xl bg-white/5 hover:bg-white/10 text-white/40 transition-all border border-white/5 active:scale-95"
                 >
@@ -194,7 +201,7 @@ export const LiveMatchView: React.FC<LiveMatchViewProps> = ({
                 </button>
               </>
             )}
-            <button
+            <button aria-label="Ver cronología" title="Cronología"
               onClick={() => setShowHistory(true)}
               className={`p-2 md:p-3 rounded-xl md:rounded-2xl border transition-all active:scale-95 ${liveMatch.goalHistory?.length ? 'bg-green-500/10 border-green-500/30 text-green-500' : 'bg-white/5 border-white/5 text-white/20'}`}
             >
@@ -372,7 +379,7 @@ export const LiveMatchView: React.FC<LiveMatchViewProps> = ({
                   <p className="text-[10px] text-green-500 font-bold uppercase tracking-widest">Eventos del partido</p>
                 </div>
               </div>
-              <button onClick={() => setShowHistory(false)} className="p-3 bg-white/5 rounded-2xl text-white/40 hover:text-white transition-colors">
+              <button aria-label="Cerrar cronología" onClick={() => setShowHistory(false)} className="p-3 bg-white/5 rounded-2xl text-white/40 hover:text-white transition-colors">
                 <X className="w-6 h-6" />
               </button>
             </div>
@@ -403,9 +410,9 @@ export const LiveMatchView: React.FC<LiveMatchViewProps> = ({
                       <div className={`w-8 h-10 rounded-lg shadow-xl ${isYellow ? 'bg-yellow-400' : 'bg-red-500'}`} />
                     )}
                     {isAdminUser && (
-                      <button 
+                      <button aria-label="Eliminar evento" 
                         onClick={() => {
-                          if (isGoal) onUpdateScore(event.teamIndex, -1);
+                          if (isGoal) onUpdateScore(event.teamIndex, -(event.value ?? 1));
                           else onUpdateCard(event.teamIndex, event.type as 'yellow' | 'red', -1);
                         }}
                         className="ml-4 p-2 bg-red-500/10 text-red-500 rounded-lg hover:bg-red-500/20 transition-colors"

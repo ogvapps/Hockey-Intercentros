@@ -22,6 +22,9 @@ export interface WizardResult {
   matchDuration: number;
 }
 
+/** The knockout bracket supports up to quarter-finals (8 seeds, with byes below that). */
+const MAX_KNOCKOUT_TEAMS = 8;
+
 const COLORS = [
   '#2563eb', '#dc2626', '#16a34a', '#f97316', '#7c3aed', '#ec4899',
   '#0891b2', '#eab308', '#6366f1', '#14b8a6', '#f43f5e', '#8b5cf6',
@@ -91,7 +94,7 @@ export const TournamentWizard: React.FC<TournamentWizardProps> = ({ isOpen, onCl
       case 1: return tournamentName.trim().length > 0 && categories.length > 0;
       case 2: return categories.every(cat => {
         const t = teamsByCategory[cat] || [];
-        return t.length >= 4 && t.every(team => team.name.trim().length > 0);
+        return t.length >= 4 && (format !== 'knockout' || t.length <= MAX_KNOCKOUT_TEAMS) && t.every(team => team.name.trim().length > 0);
       });
       case 3: return true;
       default: return false;
@@ -413,6 +416,12 @@ export const TournamentWizard: React.FC<TournamentWizardProps> = ({ isOpen, onCl
               {currentCatTeams.length < 4 && (
                 <div className="text-xs text-red-500 font-bold text-center">
                   Mínimo 4 equipos por categoría
+                </div>
+              )}
+
+              {format === 'knockout' && currentCatTeams.length > MAX_KNOCKOUT_TEAMS && (
+                <div className="text-xs text-red-500 font-bold text-center">
+                  La eliminatoria directa admite un máximo de {MAX_KNOCKOUT_TEAMS} equipos por categoría
                 </div>
               )}
             </div>

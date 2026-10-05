@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, onSnapshot, doc, writeBatch, updateDoc, getDocs, setDoc, deleteDoc } from 'firebase/firestore';
-import { db } from '../services/firebase';
+import { collection, onSnapshot, doc, writeBatch, updateDoc, getDocs, getDoc, WriteBatch } from 'firebase/firestore';
+import { db, commitInChunks, generatePin, setScopePin, secretDoc, GLOBAL_SCOPE, MIN_PIN_LENGTH } from '../services/firebase';
 import type { WizardResult } from './TournamentWizard';
-import { Wand2, Trophy, ArrowRight, ChevronDown, RotateCcw, Copy, Archive, Trash2, Key } from 'lucide-react';
+import { Wand2, Trophy, ArrowRight, ChevronDown, RotateCcw, Copy, Archive, Trash2, Key, LogOut } from 'lucide-react';
 import { Footer } from './Footer';
 import { useAuth } from '../hooks/useAuth';
 import { PinModal } from './PinModal';
+import { PromptModal } from './PromptModal';
 import toast from 'react-hot-toast';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -17,6 +18,7 @@ export const HomeView: React.FC = () => {
   const [archivedTournaments, setArchivedTournaments] = useState<{ id: string, title: string, tournamentName: string, icon: string }[]>([]);
   const [showWizard, setShowWizard] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [globalPinPrompt, setGlobalPinPrompt] = useState<{ isOpen: boolean; defaultValue: string }>({ isOpen: false, defaultValue: '' });
   
   const authState = useAuth();
   const navigate = useNavigate();
@@ -37,10 +39,11 @@ export const HomeView: React.FC = () => {
   }, []);
 
   const handleCreateTournament = async (result: WizardResult) => {
-    if (!authState.isAdminUser) return;
+    if (!authState.isGlobalAdmin) return;
     toast.loading('Creando torneo...', { id: 'wizard-toast' });
     try {
       const batch = writeBatch(db);
+      const pin = generatePin();
       const newId = result.tournamentName.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Date.now().toString().slice(-4);
       const settingsRef = doc(db, 'tournaments', newId);
       batch.set(settingsRef, {
@@ -48,7 +51,6 @@ export const HomeView: React.FC = () => {
         sportId: result.sport.id,
         tournamentName: result.tournamentName,
         matchDuration: result.matchDuration > 0 ? result.matchDuration : (result.sport.defaultDuration || 600),
-        adminPin: '1234',
         createdAt: new Date().toISOString(),
         format: result.format,
         startTime: result.startTime,
@@ -66,9 +68,10 @@ export const HomeView: React.FC = () => {
           });
         });
       }
+      setScopePin(batch, newId, pin, false);
       await batch.commit();
       setShowWizard(false);
-      toast.success('¡Torneo creado!', { id: 'wizard-toast' });
+      toast.success(`¡Torneo creado! PIN del torneo: ${pin}. Apúntalo; puedes cambiarlo con el botón PIN.`, { id: 'wizard-toast', duration: 20000 });
       navigate(`/t/${newId}`);
     } catch (e: any) {
       toast.error(`Error: ${e?.message}`, { id: 'wizard-toast' });
@@ -76,18 +79,19 @@ export const HomeView: React.FC = () => {
   };
 
   const handleAction = async (id: string, action: 'archive' | 'delete' | 'restore') => {
+    if (!authState.isGlobalAdmin) return;
     if (action === 'delete' && !window.confirm("Borrar permanentemente. ¿Continuar?")) return;
     const toastId = toast.loading('Procesando...');
     try {
       if (action === 'delete') {
-        const batch = writeBatch(db);
         const [teams, matches] = await Promise.all([
           getDocs(collection(db, 'tournaments', id, 'teams')),
           getDocs(collection(db, 'tournaments', id, 'matches'))
         ]);
-        teams.forEach(d => batch.delete(d.ref));
-        matches.forEach(d => batch.delete(d.ref));
+        await commitInChunks(db, [...teams.docs, ...matches.docs].map(d => (b: WriteBatch) => { b.delete(d.ref); }));
+        const batch = writeBatch(db);
         batch.delete(doc(db, 'tournaments', id));
+        batch.delete(secretDoc(id));
         await batch.commit();
       } else {
         await updateDoc(doc(db, 'tournaments', id), { isArchived: action === 'archive' });
@@ -98,6 +102,34 @@ export const HomeView: React.FC = () => {
     }
   };
 
+  const openGlobalPinPrompt = async () => {
+    let current = '';
+    try {
+      const snap = await getDoc(secretDoc(GLOBAL_SCOPE));
+      current = snap.exists() ? (snap.data().pin as string) : '';
+    } catch {}
+    setGlobalPinPrompt({ isOpen: true, defaultValue: current });
+  };
+
+  const saveGlobalPin = async (value: string) => {
+    setGlobalPinPrompt({ isOpen: false, defaultValue: '' });
+    const pin = value.trim();
+    if (!pin) return;
+    if (pin.length < MIN_PIN_LENGTH) {
+      toast.error(`El PIN debe tener al menos ${MIN_PIN_LENGTH} caracteres`);
+      return;
+    }
+    try {
+      const batch = writeBatch(db);
+      setScopePin(batch, GLOBAL_SCOPE, pin, true);
+      await batch.commit();
+      toast.success('PIN global actualizado');
+    } catch (e) {
+      console.error(e);
+      toast.error('No se pudo guardar el PIN global');
+    }
+  };
+
   const containerVariants = {
     hidden: { opacity: 0 },
     show: { opacity: 1, transition: { staggerChildren: 0.1 } }
@@ -105,7 +137,7 @@ export const HomeView: React.FC = () => {
 
   const itemVariants = {
     hidden: { opacity: 0, y: 20 },
-    show: { opacity: 1, y: 0, transition: { type: 'spring', stiffness: 300, damping: 24 } }
+    show: { opacity: 1, y: 0, transition: { type: 'spring' as const, stiffness: 300, damping: 24 } }
   };
 
   return (
@@ -176,10 +208,10 @@ export const HomeView: React.FC = () => {
                 </div>
 
                 <div className="relative z-10 flex items-center gap-2 shrink-0">
-                  {authState.isAdminUser && (
+                  {authState.isGlobalAdmin && (
                     <div className="flex items-center gap-1.5 mr-2" onClick={e => e.stopPropagation()}>
-                      <button onClick={() => handleAction(t.id, 'archive')} className="p-2 text-orange-500 hover:bg-orange-500/10 rounded-xl transition-colors backdrop-blur-md border border-orange-500/20" title="Archivar"><Archive className="w-4 h-4" /></button>
-                      <button onClick={() => handleAction(t.id, 'delete')} className="p-2 text-red-500 hover:bg-red-500/10 rounded-xl transition-colors backdrop-blur-md border border-red-500/20" title="Eliminar"><Trash2 className="w-4 h-4" /></button>
+                      <button onClick={() => handleAction(t.id, 'archive')} className="p-2 text-orange-500 hover:bg-orange-500/10 rounded-xl transition-colors backdrop-blur-md border border-orange-500/20" title="Archivar" aria-label={`Archivar ${t.tournamentName}`}><Archive className="w-4 h-4" /></button>
+                      <button onClick={() => handleAction(t.id, 'delete')} className="p-2 text-red-500 hover:bg-red-500/10 rounded-xl transition-colors backdrop-blur-md border border-red-500/20" title="Eliminar" aria-label={`Eliminar ${t.tournamentName}`}><Trash2 className="w-4 h-4" /></button>
                     </div>
                   )}
                   <div className="w-10 h-10 rounded-full bg-natural-sidebar/50 flex items-center justify-center group-hover:bg-natural-primary group-hover:text-white text-natural-text/30 transition-all duration-300">
@@ -190,7 +222,7 @@ export const HomeView: React.FC = () => {
             ))
           )}
 
-          {authState.isAdminUser && (
+          {authState.isGlobalAdmin && (
             <motion.button
               variants={itemVariants}
               whileHover={{ scale: 1.02 }}
@@ -204,7 +236,50 @@ export const HomeView: React.FC = () => {
             </motion.button>
           )}
 
-          {!authState.isAdminUser && (
+          {authState.isGlobalAdmin && archivedTournaments.length > 0 && (
+            <motion.div variants={itemVariants} className="card-glass rounded-2xl border border-natural-border/50">
+              <button
+                onClick={() => setShowArchived(v => !v)}
+                aria-expanded={showArchived}
+                className="w-full flex items-center justify-between px-5 py-3 text-sm font-bold text-natural-text/60"
+              >
+                <span>Archivados ({archivedTournaments.length})</span>
+                <ChevronDown className={`w-4 h-4 transition-transform ${showArchived ? 'rotate-180' : ''}`} />
+              </button>
+              {showArchived && (
+                <ul className="px-3 pb-3 space-y-2">
+                  {archivedTournaments.map(t => (
+                    <li key={t.id} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-natural-sidebar/50">
+                      <button onClick={() => navigate(`/t/${t.id}`)} className="flex-1 min-w-0 text-left truncate text-sm font-bold">
+                        {t.icon} {t.tournamentName}
+                      </button>
+                      <button onClick={() => handleAction(t.id, 'restore')} className="p-2 text-green-600 hover:bg-green-500/10 rounded-xl" title="Restaurar" aria-label={`Restaurar ${t.tournamentName}`}><RotateCcw className="w-4 h-4" /></button>
+                      <button onClick={() => handleAction(t.id, 'delete')} className="p-2 text-red-500 hover:bg-red-500/10 rounded-xl" title="Eliminar" aria-label={`Eliminar ${t.tournamentName}`}><Trash2 className="w-4 h-4" /></button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </motion.div>
+          )}
+
+          {authState.isGlobalAdmin && (
+            <motion.div variants={itemVariants} className="flex gap-3">
+              <button
+                onClick={openGlobalPinPrompt}
+                className="flex-1 py-3 flex items-center justify-center gap-2 card-glass border border-natural-border text-natural-text rounded-2xl text-sm font-bold hover:bg-natural-sidebar transition-all"
+              >
+                <Key className="w-4 h-4" /> PIN global
+              </button>
+              <button
+                onClick={authState.handleLogOut}
+                className="flex-1 py-3 flex items-center justify-center gap-2 card-glass border border-natural-border text-natural-text rounded-2xl text-sm font-bold hover:bg-natural-sidebar transition-all"
+              >
+                <LogOut className="w-4 h-4" /> Cerrar sesión
+              </button>
+            </motion.div>
+          )}
+
+          {!authState.isGlobalAdmin && (
             <motion.button
               variants={itemVariants}
               whileHover={{ scale: 1.02 }}
@@ -230,7 +305,14 @@ export const HomeView: React.FC = () => {
       <React.Suspense fallback={null}>
         {showWizard && <TournamentWizard isOpen={showWizard} onClose={() => setShowWizard(false)} onComplete={handleCreateTournament} />}
       </React.Suspense>
-      {authState.showPinModal && <PinModal pinInput={authState.pinInput} setPinInput={authState.setPinInput} onSubmit={authState.handlePinSubmit} onClose={() => authState.setShowPinModal(false)} />}
+      {authState.showPinModal && <PinModal pinInput={authState.pinInput} setPinInput={authState.setPinInput} onSubmit={authState.handlePinSubmit} onClose={() => authState.setShowPinModal(false)} submitting={authState.pinSubmitting} onGoogleSignIn={authState.handleSignIn} />}
+      <PromptModal
+        isOpen={globalPinPrompt.isOpen}
+        title={`PIN global de organizador (mín. ${MIN_PIN_LENGTH} caracteres):`}
+        defaultValue={globalPinPrompt.defaultValue}
+        onConfirm={saveGlobalPin}
+        onCancel={() => setGlobalPinPrompt({ isOpen: false, defaultValue: '' })}
+      />
       <Footer />
     </div>
   );

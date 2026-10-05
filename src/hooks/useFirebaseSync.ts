@@ -14,11 +14,16 @@ export function useFirebaseSync(tournamentId?: string) {
   
   const prevMatchesRef = useRef<MatchRecord[]>([]);
 
-  // Request Notification Permission
+  // Ask for notification permission on the first interaction, not on page load
+  // (browsers ignore or penalise prompts that are not triggered by the user).
   useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
+    if (!('Notification' in window) || Notification.permission !== 'default') return;
+    const ask = () => {
+      window.removeEventListener('pointerdown', ask);
+      Notification.requestPermission().catch(() => {});
+    };
+    window.addEventListener('pointerdown', ask);
+    return () => window.removeEventListener('pointerdown', ask);
   }, []);
 
   // Sync Settings

@@ -1,6 +1,6 @@
 import React from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
-import { Activity, Edit2, LogIn, LogOut, Settings, Clock, Share2, Moon, Sun, Key, User as UserIcon, Eye, FileDown, Shuffle, Printer, Wand2, Trash2, Home, Archive, Copy } from 'lucide-react';
+import { Activity, Edit2, LogIn, LogOut, Settings, Clock, Share2, Moon, Sun, Key, User as UserIcon, Eye, FileDown, Shuffle, Printer, Wand2, Trash2, Home, Archive, Copy, Trophy } from 'lucide-react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db, subscribeToOnlineCount } from '../services/firebase';
 import { AppSettings } from '../types';
@@ -9,6 +9,8 @@ interface HeaderProps {
   appSettings: AppSettings;
   user: FirebaseUser | null;
   isAdminUser: boolean;
+  /** Global admins can also create (duplicate) tournaments. */
+  isGlobalAdmin: boolean;
   isDarkMode: boolean;
   onToggleDarkMode: () => void;
   onSignIn: () => void;
@@ -16,6 +18,7 @@ interface HeaderProps {
   onUpdateTitle: () => void;
   onUpdateDuration: () => void;
   onUpdatePin: () => void;
+  onUpdateSport: () => void;
   onShowPinModal: () => void;
   onShowQRModal: () => void;
   onDownloadPDF: () => void;
@@ -32,6 +35,7 @@ export const Header: React.FC<HeaderProps> = ({
   appSettings,
   user,
   isAdminUser,
+  isGlobalAdmin,
   isDarkMode,
   onToggleDarkMode,
   onSignIn,
@@ -39,6 +43,7 @@ export const Header: React.FC<HeaderProps> = ({
   onUpdateTitle,
   onUpdateDuration,
   onUpdatePin,
+  onUpdateSport,
   onShowPinModal,
   onShowQRModal,
   onDownloadPDF,
@@ -96,6 +101,8 @@ export const Header: React.FC<HeaderProps> = ({
         </button>
         <button
           onClick={onToggleDarkMode}
+          title={isDarkMode ? 'Modo Claro' : 'Modo Oscuro'}
+          aria-label={isDarkMode ? 'Activar modo claro' : 'Activar modo oscuro'}
           className="flex items-center justify-center w-10 h-10 bg-white/80 dark:bg-white/10 backdrop-blur-sm rounded-xl text-natural-primary shadow-sm hover:shadow-md transition-all active:scale-95 border border-natural-border/50"
         >
           {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
@@ -141,13 +148,14 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             )}
             <div className="hidden sm:flex flex-col items-start leading-none mr-1">
-              <span className="text-[10px] font-bold truncate max-w-[80px]">{user.displayName?.split(' ')[0]}</span>
+              <span className="text-[10px] font-bold truncate max-w-[80px]">{user.isAnonymous ? 'PIN' : user.displayName?.split(' ')[0]}</span>
               {isAdminUser && <span className="text-[7px] text-natural-primary font-bold uppercase tracking-widest">Admin</span>}
             </div>
             <button
               onClick={onLogOut}
               className="p-1 text-natural-text/40 hover:text-red-500 transition-colors"
               title="Cerrar Sesión"
+              aria-label="Cerrar sesión"
             >
               <LogOut className="w-4 h-4" />
             </button>
@@ -198,6 +206,13 @@ export const Header: React.FC<HeaderProps> = ({
               <Key className="w-3.5 h-3.5" /> PIN
             </button>
             <button 
+              onClick={onUpdateSport} 
+              title="Cambiar Deporte" 
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-natural-card border border-natural-border text-natural-text/60 hover:text-natural-primary hover:border-natural-primary transition-all text-[10px] font-bold uppercase tracking-wider"
+            >
+              <Trophy className="w-3.5 h-3.5" /> Deporte
+            </button>
+            <button 
               onClick={onDownloadPDF} 
               title="Descargar Informe PDF" 
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-natural-primary text-white hover:bg-natural-primary/80 transition-all text-[10px] font-bold uppercase tracking-wider shadow-sm"
@@ -227,13 +242,13 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
             {isAdminUser && (
               <>
-                <button 
+                {isGlobalAdmin && <button 
                   onClick={onDuplicateTournament} 
                   title="Duplicar Torneo" 
                   className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 transition-all text-[10px] font-bold uppercase tracking-wider shadow-sm"
                 >
                   <Copy className="w-3.5 h-3.5" /> Duplicar
-                </button>
+                </button>}
                 <button 
                   onClick={onArchiveTournament} 
                   title="Archivar Torneo" 

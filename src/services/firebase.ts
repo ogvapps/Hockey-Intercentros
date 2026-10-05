@@ -6,7 +6,6 @@ import {
   persistentMultipleTabManager,
   doc,
   increment,
-  getDoc,
   setDoc,
   Timestamp,
   collection,
@@ -14,7 +13,10 @@ import {
   where,
   onSnapshot,
   deleteDoc,
-  getDocFromServer
+  serverTimestamp,
+  writeBatch,
+  WriteBatch,
+  Firestore
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -78,16 +80,6 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   throw new Error(JSON.stringify(errInfo));
 }
 
-export async function testConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if(error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration.");
-    }
-  }
-}
-
 export async function signIn() {
   try {
     return await signInWithPopup(auth, googleProvider);
@@ -122,7 +114,7 @@ export async function incrementVisits() {
     const statsRef = doc(db, 'stats', 'visits');
     await setDoc(statsRef, { 
       total: increment(1),
-      lastUpdate: Timestamp.now()
+      lastUpdate: serverTimestamp()
     }, { merge: true });
     sessionStorage.setItem(sessionKey, 'true');
   } catch (error) {
@@ -147,21 +139,96 @@ export async function updatePresence() {
   try {
     const presenceRef = doc(db, 'presence', SESSION_ID);
     await setDoc(presenceRef, {
-      lastSeen: Timestamp.now(),
-    }, { merge: true });
+      lastSeen: serverTimestamp(),
+    });
   } catch (error) {
     // Silently fail for presence to not disturb user
   }
 }
 
+/**
+ * Counts sessions seen in the last two minutes. The time window is a fixed
+ * value inside the query, so the query is rebuilt every minute to keep
+ * sliding forward.
+ */
 export function subscribeToOnlineCount(callback: (count: number) => void) {
-  const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
-  const q = query(
-    collection(db, 'presence'),
-    where('lastSeen', '>', Timestamp.fromDate(twoMinutesAgo))
-  );
+  let unsubSnapshot = () => {};
 
-  return onSnapshot(q, (snapshot) => {
-    callback(snapshot.size);
-  });
+  const subscribe = () => {
+    unsubSnapshot();
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    const q = query(
+      collection(db, 'presence'),
+      where('lastSeen', '>', Timestamp.fromDate(twoMinutesAgo))
+    );
+    unsubSnapshot = onSnapshot(
+      q,
+      (snapshot) => callback(snapshot.size),
+      (err) => console.warn('Online count error:', err.code)
+    );
+  };
+
+  subscribe();
+  const interval = setInterval(subscribe, 60 * 1000);
+  return () => {
+    clearInterval(interval);
+    unsubSnapshot();
+  };
+}
+
+// ── Admin PINs ──────────────────────────────────────────────────
+// PINs are stored in /secrets/{scope} (never publicly readable). A scope is a
+// tournament id, 'legacy' for the root collections, or 'global'.
+
+export const GLOBAL_SCOPE = 'global';
+export const MIN_PIN_LENGTH = 6;
+
+const sessionDoc = (uid: string, scope: string) => doc(db, 'adminSessions', uid, 'scopes', scope);
+export const secretDoc = (scope: string) => doc(db, 'secrets', scope);
+
+/** Tries to open a PIN session for a scope. Resolves false when the PIN is wrong. */
+export async function openPinSession(scope: string, pin: string): Promise<boolean> {
+  if (!auth.currentUser) await signInAnonymously(auth);
+  const uid = auth.currentUser!.uid;
+  try {
+    await setDoc(sessionDoc(uid, scope), { pin, createdAt: serverTimestamp() });
+    return true;
+  } catch (e: any) {
+    if (e?.code === 'permission-denied') return false;
+    throw e;
+  }
+}
+
+export async function closePinSessions(scopes: string[]) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) return;
+  await Promise.all(scopes.map(s => deleteDoc(sessionDoc(uid, s)).catch(() => {})));
+}
+
+/** Adds the write that sets a scope's PIN; also refreshes the caller's own session so they stay unlocked. */
+export function setScopePin(batch: WriteBatch, scope: string, pin: string, keepOwnSession: boolean) {
+  batch.set(secretDoc(scope), { pin, updatedAt: serverTimestamp() });
+  const uid = auth.currentUser?.uid;
+  if (keepOwnSession && uid) {
+    batch.set(sessionDoc(uid, scope), { pin, createdAt: serverTimestamp() });
+  }
+}
+
+export function generatePin(length = MIN_PIN_LENGTH) {
+  const digits = new Uint32Array(length);
+  crypto.getRandomValues(digits);
+  return Array.from(digits, d => (d % 10).toString()).join('');
+}
+
+// ── Batched writes ──────────────────────────────────────────────
+// Firestore rejects batches with more than 500 writes.
+
+const MAX_BATCH_OPS = 450;
+
+export async function commitInChunks(firestore: Firestore, ops: ((batch: WriteBatch) => void)[]) {
+  for (let i = 0; i < ops.length; i += MAX_BATCH_OPS) {
+    const batch = writeBatch(firestore);
+    ops.slice(i, i + MAX_BATCH_OPS).forEach(op => op(batch));
+    await batch.commit();
+  }
 }

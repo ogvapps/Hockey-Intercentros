@@ -4,13 +4,13 @@
  */
 
 import React, { useState, useMemo, useRef } from 'react';
-import { doc, setDoc, updateDoc, deleteDoc, collection, writeBatch, Timestamp, query, where, getDocs } from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType, incrementVisits, updatePresence } from '../services/firebase';
+import { doc, setDoc, updateDoc, deleteDoc, collection, writeBatch, Timestamp, query, where, getDocs, getDoc, deleteField, WriteBatch } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType, incrementVisits, updatePresence, commitInChunks, setScopePin, secretDoc, generatePin, MIN_PIN_LENGTH } from '../services/firebase';
 import { toast } from 'react-hot-toast';
 
 import { Category, TabType, LiveMatchData, Team, MatchRecord } from '../types';
 import { TEAMS_MASCULINO, TEAMS_FEMENINO } from '../constants/teams';
-import { SCHEDULES, buildSchedule } from '../constants/schedule';
+import { buildSchedule } from '../constants/schedule';
 import { SPORTS } from '../constants/sports';
 // PDF & print utils are lazy-loaded to reduce initial bundle
 // import { generateTournamentPDF } from '../utils/pdfGenerator';
@@ -23,6 +23,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../hooks/useAuth';
 import { useFirebaseSync } from '../hooks/useFirebaseSync';
 import { useTimer } from '../hooks/useTimer';
+import { useTheme } from '../hooks/useTheme';
 
 import { Header } from './Header';
 import { NavTabs } from './NavTabs';
@@ -41,7 +42,6 @@ import type { WizardResult } from './TournamentWizard';
 const TournamentWizard = React.lazy(() =>
   import('./TournamentWizard').then(m => ({ default: m.TournamentWizard }))
 );
-import { getSport } from '../constants/sports';
 import { playClick } from '../utils/audio';
 import { Footer } from './Footer';
 import { LiveScoreBar } from './LiveScoreBar';
@@ -52,7 +52,9 @@ export default function TournamentApp() {
   const { tournamentId } = useParams<{ tournamentId: string }>();
   const navigate = useNavigate();
   const syncId = tournamentId === 'legacy' ? undefined : tournamentId;
-  
+  // PIN scope used by the security rules: the tournament id, or 'legacy'.
+  const pinScope = syncId || 'legacy';
+
   const getMatchDoc = (id?: string) => {
     const finalId = id || liveMatch?.id;
     if (!finalId) throw new Error("No match ID provided");
@@ -81,20 +83,8 @@ export default function TournamentApp() {
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
   const [liveMatch, setLiveMatch] = useState<LiveMatchData | null>(null);
   const [showWizard, setShowWizard] = useState(false);
-  
-  const [isDarkMode, setIsDarkMode] = useState(() => {
-    return localStorage.getItem('theme') === 'dark';
-  });
 
-  React.useEffect(() => {
-    if (isDarkMode) {
-      document.documentElement.classList.add('dark');
-      localStorage.setItem('theme', 'dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-      localStorage.setItem('theme', 'light');
-    }
-  }, [isDarkMode]);
+  const { isDarkMode, toggleTheme } = useTheme();
 
   React.useEffect(() => {
     incrementVisits();
@@ -138,7 +128,7 @@ export default function TournamentApp() {
   }>({ isOpen: false, step: 'idle', progress: 0, message: '' });
 
   const { matches, teams, appSettings } = useFirebaseSync(syncId);
-  const authState = useAuth(appSettings.adminPin);
+  const authState = useAuth(pinScope);
   const timer = useTimer();
 
   // Derived data
@@ -174,6 +164,35 @@ export default function TournamentApp() {
   const groupBStandings = standings.filter(t => t.group === 'B' && !t.isRest);
   const exportText = useMemo(() => formatExportText(matches), [matches]);
 
+  // ── PIN migration ─────────────────────────────────────────────
+  // Older versions stored the PIN in the public settings document. A global
+  // admin removes it on sight; since it was public, it is not reused: the
+  // admin is asked for a new one when the scope has no secret yet.
+  React.useEffect(() => {
+    if (!authState.isGlobalAdmin || appSettings.adminPin === undefined) return;
+    updateDoc(getSettingsDoc(), { adminPin: deleteField() })
+      .catch(e => console.error('PIN migration error:', e));
+  }, [authState.isGlobalAdmin, appSettings.adminPin, pinScope]);
+
+  const secretCheckedRef = useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!authState.isGlobalAdmin || secretCheckedRef.current === pinScope) return;
+    secretCheckedRef.current = pinScope;
+    (async () => {
+      try {
+        const secret = await getDoc(secretDoc(pinScope));
+        if (!secret.exists()) {
+          requestPrompt(`Este torneo aún no tiene PIN seguro. Crea uno nuevo (mín. ${MIN_PIN_LENGTH} caracteres):`, generatePin(), (value) => {
+            closePrompt();
+            savePin(value);
+          });
+        }
+      } catch (e) {
+        console.error('PIN migration error:', e);
+      }
+    })();
+  }, [authState.isGlobalAdmin, pinScope]);
+
   // ── Match Actions ──────────────────────────────────────────────
 
   const handleTeamClick = (teamName: string) => {
@@ -189,11 +208,25 @@ export default function TournamentApp() {
       (m?.team1?.name === t2Name && m?.team2?.name === t1Name)
     );
     const mId = customId || mInfo?.id || `${activeCategory}-${t1Name}-${t2Name}`.replace(/[^a-z0-9]/gi, '-').toLowerCase();
-    
+
     // Si ya existe en Firestore y está marcado como live, simplemente lo retomamos
     const existing = matches.find(m => m.id === mId);
     if (existing && existing.isLive) {
       handleResumeMatch(existing);
+      return;
+    }
+    // Si ya se jugó, se abre para editar conservando el marcador (no se pone a 0)
+    if (existing && existing.played) {
+      if (!authState.isAdminUser) return;
+      setLiveMatch(existing);
+      try {
+        await updateDoc(getMatchDoc(existing.id), { isLive: true, updatedAt: Timestamp.now() });
+      } catch (e) {
+        console.error("Error al reabrir partido:", e);
+      }
+      timer.setTime(existing.currentTime || durationOverride || appSettings.matchDuration || MATCH_DURATION_SECONDS);
+      timer.setTimerRunning(false);
+      setActiveTab('live');
       return;
     }
 
@@ -208,9 +241,9 @@ export default function TournamentApp() {
       timerRunning: false,
       goalHistory: []
     };
-    
+
     setLiveMatch(newMatch);
-    
+
     // Limpiar otros partidos en vivo de la misma categoría para evitar duplicados
     if (authState.isAdminUser) {
       try {
@@ -218,7 +251,7 @@ export default function TournamentApp() {
         for (const m of otherLiveMatches) {
           await updateDoc(getMatchDoc(m.id), { isLive: false });
         }
-        
+
         await setDoc(getMatchDoc(newMatch.id), {
           ...newMatch,
           isLive: true,
@@ -251,20 +284,28 @@ export default function TournamentApp() {
     const newS2 = teamIndex === 2 ? Math.max(0, currentS2 + delta) : currentS2;
 
     // Calcular nuevo historial
-    let newHistory = [...(liveMatch.goalHistory || [])];
+    const newHistory = [...(liveMatch.goalHistory || [])];
     if (delta > 0) {
       newHistory.push({
         teamIndex,
         time: timer.time,
         score: `${newS1}-${newS2}`,
-        type: 'goal'
+        type: 'goal',
+        value: delta
       });
     } else if (delta < 0) {
-      // Si restamos, buscamos el último gol de ese equipo y lo borramos
+      // Si restamos, quitamos puntos de la última anotación de ese equipo
+      // (una canasta de 2 o 3 pasa a valer uno menos en vez de desaparecer)
       const lastGoalIdx = [...newHistory].reverse().findIndex(g => g.teamIndex === teamIndex && (g.type === 'goal' || !g.type));
       if (lastGoalIdx !== -1) {
         const actualIdx = newHistory.length - 1 - lastGoalIdx;
-        newHistory.splice(actualIdx, 1);
+        const entry = newHistory[actualIdx];
+        const value = entry.value ?? 1;
+        if (value > -delta) {
+          newHistory[actualIdx] = { ...entry, value: value + delta, score: `${newS1}-${newS2}` };
+        } else {
+          newHistory.splice(actualIdx, 1);
+        }
       }
     }
 
@@ -293,14 +334,14 @@ export default function TournamentApp() {
 
     const yField = teamIndex === 1 ? 'yellowCards1' : 'yellowCards2';
     const rField = teamIndex === 1 ? 'redCards1' : 'redCards2';
-    
+
     const currentY = liveMatch[yField] || 0;
     const currentR = liveMatch[rField] || 0;
-    
+
     const newY = type === 'yellow' ? Math.max(0, currentY + delta) : currentY;
     const newR = type === 'red' ? Math.max(0, currentR + delta) : currentR;
 
-    let newHistory = [...(liveMatch.goalHistory || [])];
+    const newHistory = [...(liveMatch.goalHistory || [])];
     if (delta > 0) {
       newHistory.push({
         teamIndex,
@@ -354,7 +395,7 @@ export default function TournamentApp() {
       }
 
       await setDoc(getMatchDoc(), matchData, { merge: true });
-      
+
       const isPlayoff = liveMatch!.group === 'PLAYOFF';
       cancelLiveMatch();
       setActiveTab(isPlayoff ? 'playoffs' : 'schedule');
@@ -369,6 +410,15 @@ export default function TournamentApp() {
       closeConfirm();
       await finalizeEndMatch(p1, p2);
     });
+  };
+
+  const syncTimer = async (matchId: string, time: number, running: boolean) => {
+    if (!authState.isAdminUser) return;
+    try {
+      await updateDoc(getMatchDoc(matchId), { currentTime: time, timerRunning: running, updatedAt: Timestamp.now() });
+    } catch (e) {
+      console.warn("Error sincronizando el reloj:", e);
+    }
   };
 
   const cancelLiveMatch = () => {
@@ -398,9 +448,7 @@ export default function TournamentApp() {
     try {
       const q = query(getMatchesCol(), where('category', '==', activeCategory));
       const snapshot = await getDocs(q);
-      const batch = writeBatch(db);
-      snapshot.docs.forEach(d => batch.delete(d.ref));
-      await batch.commit();
+      await commitInChunks(db, snapshot.docs.map(d => (b: WriteBatch) => { b.delete(d.ref); }));
       toast.success("Categoría reseteada correctamente");
     } catch (e) {
       console.error("Error al resetear partidos:", e);
@@ -410,16 +458,16 @@ export default function TournamentApp() {
 
   const simulateTournament = async () => {
     if (!authState.isAdminUser) return;
-    
+
     setSimulation({ isOpen: true, step: 'league', progress: 5, message: 'Iniciando simulación completa...' });
     await new Promise(r => setTimeout(r, 800));
-    
+
     try {
       const batch = writeBatch(db);
       const simulatedMatches: any[] = [];
 
       const generateScore = () => {
-        const sport = appSettings.sport;
+        const sport = appSettings.sportId;
         if (sport === 'basketball') return Math.floor(Math.random() * 25) + 15; // 15 to 39
         if (sport === 'volleyball') return Math.floor(Math.random() * 3); // 0 to 2
         if (sport === 'futsal' || sport === 'handball') return Math.floor(Math.random() * 6);
@@ -432,7 +480,7 @@ export default function TournamentApp() {
         let s2 = generateScore();
         let p1, p2;
         if (s1 === s2) {
-          if (appSettings.sport === 'basketball' || appSettings.sport === 'volleyball') {
+          if (appSettings.sportId === 'basketball' || appSettings.sportId === 'volleyball') {
             s1++; // Tie-break sin penaltis
           } else {
             // Si hay empate en playoff, simulamos penaltis
@@ -453,7 +501,7 @@ export default function TournamentApp() {
         const s2 = generateScore();
         const mData = {
           id: m.id, team1: m.team1.name, team2: m.team2.name, score1: s1, score2: s2,
-          played: true, isLive: false, category: activeCategory, group: m.group, 
+          played: true, isLive: false, category: activeCategory, group: m.group,
           round: m.round, time: m.time
         };
         simulatedMatches.push(mData);
@@ -472,12 +520,12 @@ export default function TournamentApp() {
 
       // 2. PLAYOFFS
       setSimulation(s => ({ ...s, step: 'quarters', progress: 40, message: 'Calculando cruces de Playoff...' }));
-      const sA = calculateStandings(teams.filter(t => t.category === activeCategory), simulatedMatches, activeCategory, 'A', appSettings.sportId);
-      const sB = calculateStandings(teams.filter(t => t.category === activeCategory), simulatedMatches, activeCategory, 'B', appSettings.sportId);
+      const sA = calculateStandings(currentTeams, simulatedMatches, activeCategory, 'A', appSettings.sportId).filter(t => !t.isRest);
+      const sB = calculateStandings(currentTeams, simulatedMatches, activeCategory, 'B', appSettings.sportId).filter(t => !t.isRest);
 
       const hasQuarters = sA.length >= 4 && sB.length >= 4;
       const hasSemis = sA.length >= 2 && sB.length >= 2;
-      
+
       let winnersC: string[] = [];
       if (hasQuarters) {
         const qMatches = [
@@ -486,7 +534,7 @@ export default function TournamentApp() {
           { id: `${activeCategory}_C3`, t1: sB[0], t2: sA[3] },
           { id: `${activeCategory}_C4`, t1: sA[1], t2: sB[2] },
         ];
-        
+
         qMatches.forEach(m => {
           const { s1, s2, p1, p2 } = generatePlayoffResult();
           const mData: any = {
@@ -495,7 +543,7 @@ export default function TournamentApp() {
           };
           if (p1 !== undefined) { mData.penaltyScore1 = p1; mData.penaltyScore2 = p2; }
           simulatedMatches.push(mData);
-          
+
           const winner = (s1 > s2) ? m.t1.name : (s2 > s1) ? m.t2.name : (p1! > p2! ? m.t1.name : m.t2.name);
           winnersC.push(winner);
           batch.set(getMatchDoc(m.id), { ...mData, updatedAt: Timestamp.now() }, { merge: true });
@@ -513,7 +561,7 @@ export default function TournamentApp() {
           { id: `${activeCategory}_S1`, t1: winnersC[0], t2: winnersC[1] },
           { id: `${activeCategory}_S2`, t1: winnersC[2], t2: winnersC[3] },
         ];
-        
+
         sMatches.forEach(m => {
           const { s1, s2, p1, p2 } = generatePlayoffResult();
           const mData: any = {
@@ -542,7 +590,7 @@ export default function TournamentApp() {
         if (losersS.length === 2) {
           finalMatches.push({ id: `${activeCategory}_T`, t1: losersS[0], t2: losersS[1] });
         }
-        
+
         finalMatches.forEach(m => {
           const { s1, s2, p1, p2 } = generatePlayoffResult();
           const mData: any = {
@@ -590,13 +638,48 @@ export default function TournamentApp() {
     });
   };
 
-  const updatePin = () => {
-    requestPrompt("Nuevo PIN de administrador:", appSettings.adminPin || "I2026", async (newPin) => {
+  const savePin = async (value: string) => {
+    const pin = value.trim();
+    if (!pin) return;
+    if (pin.length < MIN_PIN_LENGTH) {
+      toast.error(`El PIN debe tener al menos ${MIN_PIN_LENGTH} caracteres`);
+      return;
+    }
+    try {
+      const batch = writeBatch(db);
+      setScopePin(batch, pinScope, pin, true);
+      await batch.commit();
+      toast.success("PIN actualizado. Los accesos con el PIN anterior quedan anulados.");
+    } catch (e) {
+      handleFirestoreError(e, OperationType.WRITE, `secrets/${pinScope}`);
+    }
+  };
+
+  const updatePin = async () => {
+    if (!authState.isAdminUser) return;
+    let current = '';
+    try {
+      const snap = await getDoc(secretDoc(pinScope));
+      current = snap.exists() ? (snap.data().pin as string) : '';
+    } catch {}
+    requestPrompt(`Nuevo PIN de administrador (mín. ${MIN_PIN_LENGTH} caracteres):`, current, (newPin) => {
       closePrompt();
-      if (newPin && authState.isAdminUser) {
-        try { await updateDoc(getSettingsDoc(), { adminPin: newPin }); }
-        catch (e) { handleFirestoreError(e, OperationType.UPDATE, 'app/settings'); }
+      savePin(newPin);
+    });
+  };
+
+  const updateSport = () => {
+    if (!authState.isAdminUser) return;
+    const options = SPORTS.map(sp => sp.id).join(', ');
+    requestPrompt(`Deporte (${options}):`, appSettings.sportId || 'hockey', async (value) => {
+      closePrompt();
+      const sport = SPORTS.find(sp => sp.id === value.trim().toLowerCase() || sp.name.toLowerCase() === value.trim().toLowerCase());
+      if (!sport) {
+        toast.error("Deporte no reconocido");
+        return;
       }
+      try { await updateDoc(getSettingsDoc(), { sportId: sport.id }); toast.success(`Deporte: ${sport.name}`); }
+      catch (e) { handleFirestoreError(e, OperationType.UPDATE, 'settings'); }
     });
   };
 
@@ -672,17 +755,16 @@ export default function TournamentApp() {
   };
 
   const seedDatabase = async () => {
-    if (!authState.isAdminUser || !authState.user) return;
+    if (!authState.isAdminUser) return;
     const batch = writeBatch(db);
-    batch.set(getSettingsDoc(), { title: 'Torneo Hockey Intercentros 2026' });
-    batch.set(doc(db, 'admins', authState.user.uid), { email: authState.user.email });
+    batch.set(getSettingsDoc(), { title: 'Torneo Hockey Intercentros 2026' }, { merge: true });
     [...TEAMS_MASCULINO, ...TEAMS_FEMENINO].forEach(team => {
       const { id, ...teamData } = team;
       batch.set(doc(getTeamsCol()), teamData);
     });
-    try { 
-      await batch.commit(); 
-      toast.success("¡Base de datos inicializada!"); 
+    try {
+      await batch.commit();
+      toast.success("¡Base de datos inicializada!");
     }
     catch (e) { handleFirestoreError(e, OperationType.WRITE, 'batch seeding'); }
   };
@@ -715,44 +797,46 @@ export default function TournamentApp() {
     if (!authState.isAdminUser) return;
     toast.loading('Creando torneo...', { id: 'wizard-toast' });
     try {
-      const batch = writeBatch(db);
+      const ops: ((b: WriteBatch) => void)[] = [];
 
-      // 1. Delete old teams
-      const oldTeams = await getDocs(getTeamsCol());
-      oldTeams.forEach(d => batch.delete(d.ref));
-
-      // 2. Delete old matches
-      const oldMatches = await getDocs(getMatchesCol());
-      oldMatches.forEach(d => batch.delete(d.ref));
+      // 1-2. Delete old teams and matches
+      const [oldTeams, oldMatches] = await Promise.all([getDocs(getTeamsCol()), getDocs(getMatchesCol())]);
+      [...oldTeams.docs, ...oldMatches.docs].forEach(d => ops.push(b => { b.delete(d.ref); }));
 
       // 3. Create new teams for each category
       for (const cat of result.categories) {
-        const teams = result.teams[cat] || [];
-        const midPoint = Math.ceil(teams.length / 2);
-        teams.forEach((t, idx) => {
-          const teamId = `${cat}_t${idx + 1}`;
-          const teamRef = getTeamDoc(teamId);
-          batch.set(teamRef, {
-            name: t.name,
-            color: t.color,
-            group: idx < midPoint ? 'A' : 'B',
-            category: cat,
-            isRest: false,
+        const catTeams = result.teams[cat] || [];
+        const midPoint = Math.ceil(catTeams.length / 2);
+        catTeams.forEach((t, idx) => {
+          const teamRef = getTeamDoc(`${cat}_t${idx + 1}`);
+          ops.push(b => {
+            b.set(teamRef, {
+              name: t.name,
+              color: t.color,
+              group: result.format === 'league' ? 'A' : (idx < midPoint ? 'A' : 'B'),
+              category: cat,
+              isRest: false,
+            });
           });
         });
       }
 
-      // 4. Update app settings
-      const settingsRef = getSettingsDoc();
-      batch.set(settingsRef, {
-        title: `${result.sport.icon} ${result.tournamentName}`,
-        sportId: result.sport.id,
-        tournamentName: result.tournamentName,
-        matchDuration: result.sport.defaultDuration || appSettings.matchDuration || 600,
-        adminPin: appSettings.adminPin || '1234',
-      }, { merge: true });
+      // 4. Update settings
+      ops.push(b => {
+        b.set(getSettingsDoc(), {
+          title: `${result.sport.icon} ${result.tournamentName}`,
+          sportId: result.sport.id,
+          tournamentName: result.tournamentName,
+          matchDuration: result.matchDuration > 0 ? result.matchDuration : (result.sport.defaultDuration || 600),
+          format: result.format,
+          startTime: result.startTime,
+          endTime: result.endTime,
+          concurrentCourts: result.concurrentCourts,
+          restDuration: result.restDuration,
+        }, { merge: true });
+      });
 
-      await batch.commit();
+      await commitInChunks(db, ops);
       setShowWizard(false);
       setActiveCategory(result.categories[0] as Category);
       setActiveTab('schedule');
@@ -766,9 +850,9 @@ export default function TournamentApp() {
   const handleArchiveTournament = async () => {
     if (!authState.isAdminUser || !syncId) return;
     requestConfirm(
-      "ARCHIVAR TORNEO", 
-      "El torneo dejará de ser visible en la lista principal, pero no se borrará permanentemente. Podrás acceder a él si conoces el enlace directo.", 
-      false, 
+      "ARCHIVAR TORNEO",
+      "El torneo dejará de ser visible en la lista principal, pero no se borrará permanentemente. Podrás acceder a él si conoces el enlace directo.",
+      false,
       async () => {
         closeConfirm();
         toast.loading("Archivando torneo...", { id: 'archive-toast' });
@@ -786,24 +870,23 @@ export default function TournamentApp() {
   const handleDeleteTournament = async () => {
     if (!authState.isAdminUser) return;
     requestConfirm(
-      "ELIMINAR TORNEO", 
-      "ATENCIÓN: Vas a borrar TODOS los equipos y TODOS los partidos del torneo actual. Esta acción NO se puede deshacer. ¿Estás absolutamente seguro?", 
-      true, 
+      "ELIMINAR TORNEO",
+      "ATENCIÓN: Vas a borrar TODOS los equipos y TODOS los partidos del torneo actual. Esta acción NO se puede deshacer. ¿Estás absolutamente seguro?",
+      true,
       async () => {
         closeConfirm();
         toast.loading("Eliminando torneo...", { id: 'delete-toast' });
         try {
-          const batch = writeBatch(db);
-          const oldTeams = await getDocs(getTeamsCol());
-          oldTeams.forEach(d => batch.delete(d.ref));
-          const oldMatches = await getDocs(getMatchesCol());
-          oldMatches.forEach(d => batch.delete(d.ref));
-          
+          const [oldTeams, oldMatches] = await Promise.all([getDocs(getTeamsCol()), getDocs(getMatchesCol())]);
+          await commitInChunks(db, [...oldTeams.docs, ...oldMatches.docs].map(d => (b: WriteBatch) => { b.delete(d.ref); }));
+
+          // Settings and PIN go last: the PIN must stay valid while the children are deleted.
           if (syncId) {
+            const batch = writeBatch(db);
             batch.delete(getSettingsDoc());
+            batch.delete(secretDoc(pinScope));
+            await batch.commit();
           }
-          
-          await batch.commit();
           toast.success("Torneo eliminado", { id: 'delete-toast' });
           navigate("/");
         } catch (e) {
@@ -815,7 +898,7 @@ export default function TournamentApp() {
   };
 
   const handleDuplicateTournament = async () => {
-    if (!authState.isAdminUser || !syncId) return;
+    if (!authState.isGlobalAdmin || !syncId) return;
     const originalName = appSettings.tournamentName || appSettings.title || 'Torneo';
     requestPrompt(
       "Nombre del torneo duplicado:",
@@ -826,40 +909,36 @@ export default function TournamentApp() {
         toast.loading('Duplicando torneo...', { id: 'duplicate-toast' });
         try {
           const newId = newTournamentName.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Date.now().toString().slice(-4);
-          const batch = writeBatch(db);
+          const pin = generatePin();
 
-          // 1. Copy tournament settings
-          const newSettingsRef = doc(db, 'tournaments', newId);
+          // 1. Settings + PIN first, so the rest of the copy is authorised
           const icon = (appSettings.title || '🏆').split(' ')[0];
           const newTitle = icon.length === 2 ? `${icon} ${newTournamentName}` : newTournamentName;
-
-          batch.set(newSettingsRef, {
-            ...appSettings,
+          const { adminPin: _legacyPin, ...settingsToCopy } = appSettings;
+          const first = writeBatch(db);
+          first.set(doc(db, 'tournaments', newId), {
+            ...settingsToCopy,
             title: newTitle,
             tournamentName: newTournamentName,
             createdAt: new Date().toISOString(),
             isArchived: false, // Ensure the new duplicate is not archived
           });
+          setScopePin(first, newId, pin, false);
+          await first.commit();
 
-          // 2. Fetch all current teams and copy them
-          const oldTeamsSnap = await getDocs(getTeamsCol());
-          oldTeamsSnap.forEach(d => {
-            const newTeamRef = doc(db, 'tournaments', newId, 'teams', d.id);
-            batch.set(newTeamRef, d.data());
-          });
-
-          // 3. Fetch all current matches and copy them
-          const oldMatchesSnap = await getDocs(getMatchesCol());
-          oldMatchesSnap.forEach(d => {
-            const newMatchRef = doc(db, 'tournaments', newId, 'matches', d.id);
-            batch.set(newMatchRef, {
-              ...d.data(),
-              timerRunning: false, // Ensure timers aren't active in duplicate
-            });
-          });
-
-          await batch.commit();
-          toast.success('¡Torneo duplicado con éxito!', { id: 'duplicate-toast' });
+          // 2-3. Copy teams and matches
+          const [oldTeamsSnap, oldMatchesSnap] = await Promise.all([getDocs(getTeamsCol()), getDocs(getMatchesCol())]);
+          const ops: ((b: WriteBatch) => void)[] = [
+            ...oldTeamsSnap.docs.map(d => (b: WriteBatch) => { b.set(doc(db, 'tournaments', newId, 'teams', d.id), d.data()); }),
+            ...oldMatchesSnap.docs.map(d => (b: WriteBatch) => {
+              b.set(doc(db, 'tournaments', newId, 'matches', d.id), {
+                ...d.data(),
+                timerRunning: false, // Ensure timers aren't active in duplicate
+              });
+            }),
+          ];
+          await commitInChunks(db, ops);
+          toast.success(`¡Torneo duplicado! PIN del nuevo torneo: ${pin}`, { id: 'duplicate-toast', duration: 20000 });
           navigate(`/t/${newId}`);
         } catch (e: any) {
           console.error("Duplicate tournament error:", e);
@@ -872,46 +951,41 @@ export default function TournamentApp() {
   const handleShuffleGroups = async () => {
     if (!authState.isAdminUser) return;
     requestConfirm(
-      "Sortear Grupos", 
-      "¿Estás seguro de que quieres sortear los grupos de esta categoría? Esto asignará los equipos aleatoriamente a los grupos A y B, y borrará TODOS los partidos actuales de esta categoría.", 
-      true, 
+      "Sortear Grupos",
+      "¿Estás seguro de que quieres sortear los grupos de esta categoría? Esto asignará los equipos aleatoriamente a los grupos A y B, y borrará TODOS los partidos actuales de esta categoría.",
+      true,
       async () => {
         closeConfirm();
         toast.loading("Sorteando grupos...", { id: 'shuffle-toast' });
         try {
-          // Get the base teams for this category (always from constants to avoid stale state)
-          const baseTeams = activeCategory === 'masculino' ? TEAMS_MASCULINO : TEAMS_FEMENINO;
-          const teamsToShuffle = baseTeams.filter(t => !t.isRest);
-          
+          // This tournament's teams (Firestore, or the default list when the DB has none)
+          const teamsToShuffle = currentTeams.filter(t => !t.isRest);
+
           // Fisher-Yates shuffle
           const shuffled = [...teamsToShuffle];
           for (let i = shuffled.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
           }
-          
-          const batch = writeBatch(db);
+
           const midPoint = Math.ceil(shuffled.length / 2);
-          
-          shuffled.forEach((t, idx) => {
-            const newGroup = idx < midPoint ? 'A' : 'B';
-            // Use the original static ID as the Firestore doc ID for consistency
-            const teamRef = getTeamDoc(t.id);
-            batch.set(teamRef, {
+          const ops: ((b: WriteBatch) => void)[] = shuffled.map((t, idx) => (b: WriteBatch) => {
+            // Same doc id as the team already has, so no duplicates are created
+            b.set(getTeamDoc(t.id), {
               name: t.name,
               color: t.color,
-              group: newGroup,
+              group: idx < midPoint ? 'A' : 'B',
               category: activeCategory,
               isRest: t.isRest || false,
-            });
+            }, { merge: true });
           });
-          
+
           // Delete all matches for this category
           const qMatches = query(getMatchesCol(), where('category', '==', activeCategory));
           const matchDocs = await getDocs(qMatches);
-          matchDocs.forEach(d => batch.delete(d.ref));
-          
-          await batch.commit();
+          matchDocs.forEach(d => ops.push(b => { b.delete(d.ref); }));
+
+          await commitInChunks(db, ops);
           toast.success("Grupos sorteados correctamente", { id: 'shuffle-toast' });
         } catch (e: any) {
           console.error('Shuffle error:', e);
@@ -934,6 +1008,7 @@ export default function TournamentApp() {
           time={viewingMatch.id === liveMatch?.id ? timer.time : (viewingMatch.currentTime ?? 0)}
           timerRunning={viewingMatch.id === liveMatch?.id ? timer.timerRunning : (viewingMatch.timerRunning ?? false)}
           isAdminUser={authState.isAdminUser && viewingMatch.id === liveMatch?.id}
+          onSyncTimer={(t, running) => syncTimer(viewingMatch.id, t, running)}
           activeCategory={viewingMatch.category}
           matchDuration={appSettings.matchDuration || MATCH_DURATION_SECONDS}
           setTime={timer.setTime}
@@ -966,6 +1041,7 @@ export default function TournamentApp() {
           time={timer.time}
           timerRunning={timer.timerRunning}
           isAdminUser={authState.isAdminUser}
+          onSyncTimer={(t, running) => liveMatch.id && syncTimer(liveMatch.id, t, running)}
           activeCategory={activeCategory}
           matchDuration={appSettings.matchDuration || MATCH_DURATION_SECONDS}
           setTime={timer.setTime}
@@ -997,9 +1073,9 @@ export default function TournamentApp() {
 
   return (
     <div className={`min-h-screen bg-natural-bg flex flex-col font-sans pb-10 text-natural-text transition-colors duration-300 category-${activeCategory}`}>
-      
-      <LiveScoreBar 
-        matches={matches} 
+
+      <LiveScoreBar
+        matches={matches}
         onTeamClick={(teamName, category, match) => {
           if (authState.isAdminUser && match.isLive) {
             handleResumeMatch(match);
@@ -1015,13 +1091,15 @@ export default function TournamentApp() {
         appSettings={appSettings}
         user={authState.user}
         isAdminUser={authState.isAdminUser}
+        isGlobalAdmin={authState.isGlobalAdmin}
         isDarkMode={isDarkMode}
-        onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
+        onToggleDarkMode={toggleTheme}
         onSignIn={authState.handleSignIn}
         onLogOut={authState.handleLogOut}
         onUpdateTitle={updateTitle}
         onUpdateDuration={updateDuration}
         onUpdatePin={updatePin}
+        onUpdateSport={updateSport}
         onShowPinModal={() => authState.setShowPinModal(true)}
         onShowQRModal={() => setShowQRModal(true)}
         onDownloadPDF={handleDownloadPDF}
@@ -1061,6 +1139,9 @@ export default function TournamentApp() {
                 onTeamClick={handleTeamClick}
                 onStartMatch={(t1, t2, grp, id) => startNewMatch(t1, t2, grp, undefined, id)}
                 onUpdateMatchResult={updateMatchResult}
+                matchDuration={appSettings.matchDuration}
+                restDuration={appSettings.restDuration}
+                sportId={appSettings.sportId}
                 onDeleteMatch={deleteMatch}
                 onResumeMatch={handleResumeMatch}
                 requestPrompt={requestPrompt}
@@ -1093,9 +1174,12 @@ export default function TournamentApp() {
                 onDeleteMatch={deleteMatch}
                 onResumeMatch={handleResumeMatch}
                 format={appSettings?.format}
+                matchDuration={appSettings.matchDuration ?? MATCH_DURATION_SECONDS}
+                restDuration={appSettings.restDuration}
+                startTime={appSettings.startTime}
               />
             )}
-            
+
             {activeTab === 'ranking' && (
               <RankingView
                 groupAStandings={groupAStandings}
@@ -1146,6 +1230,8 @@ export default function TournamentApp() {
           setPinInput={authState.setPinInput}
           onSubmit={authState.handlePinSubmit}
           onClose={() => authState.setShowPinModal(false)}
+          submitting={authState.pinSubmitting}
+          onGoogleSignIn={authState.handleSignIn}
         />
       )}
 
@@ -1161,10 +1247,10 @@ export default function TournamentApp() {
       <QRModal
         isOpen={showQRModal}
         onClose={() => setShowQRModal(false)}
-        url="https://hockey-intercentros-2026.web.app"
+        url={`${window.location.origin}/t/${tournamentId || 'legacy'}`}
         title={appSettings.title}
       />
-      
+
       <PromptModal
         isOpen={promptConfig.isOpen}
         title={promptConfig.title}
@@ -1173,7 +1259,7 @@ export default function TournamentApp() {
         onConfirm={promptConfig.onConfirm}
         onCancel={closePrompt}
       />
-      <SimulationModal 
+      <SimulationModal
         isOpen={simulation.isOpen}
         step={simulation.step}
         progress={simulation.progress}

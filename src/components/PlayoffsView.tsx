@@ -5,6 +5,7 @@ import { StandingTeam, Team, Category, MatchRecord } from '../types';
 import { TeamBadge } from './TeamBadge';
 import { getMatchWinner, getMatchLoser } from '../utils/match';
 import { getComparisonName } from '../utils/standings';
+import { addMinutes, getSlotMinutes } from '../constants/schedule';
 
 interface PlayoffsViewProps {
   groupAStandings: StandingTeam[];
@@ -19,6 +20,9 @@ interface PlayoffsViewProps {
   onDeleteMatch: (id: string) => void;
   onResumeMatch: (match: MatchRecord) => void;
   format?: 'group-playoff' | 'league' | 'knockout';
+  matchDuration: number;   // seconds (0 = no clock, e.g. volleyball)
+  restDuration?: number;   // minutes
+  startTime?: string;      // tournament start, used when there is no league phase
 }
 
 export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
@@ -34,6 +38,9 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
   onDeleteMatch,
   onResumeMatch,
   format,
+  matchDuration,
+  restDuration,
+  startTime,
 }) => {
   const getTeam = (name: string | null) => {
     if (!name) return undefined;
@@ -67,36 +74,53 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
   };
 
   const isKnockout = format === 'knockout';
-  let koTeams = currentTeams.filter(t => t.category === activeCategory);
+  let koTeams = currentTeams.filter(t => t.category === activeCategory && !t.isRest);
   koTeams = [...koTeams].sort((a, b) => a.name.localeCompare(b.name));
+
+  // Bracket timetable: one match after another, starting when the league ends.
+  const matchMins = Math.floor(matchDuration / 60);
+  const slotMins = getSlotMinutes({ matchDurationMins: matchMins || undefined, restDurationMins: restDuration });
+  const lastLeagueStart = schedule.reduce((latest: string, m: any) => (m.time > latest ? m.time : latest), '');
+  const bracketStart = lastLeagueStart ? addMinutes(lastLeagueStart, slotMins) : (startTime || '09:30');
+  const slotTime = (index: number) => addMinutes(bracketStart, index * slotMins);
+  const durationText = matchMins > 0 ? `${matchMins} minutos` : 'sin reloj';
+
+  // With fewer than 8 knockout teams the missing seeds are byes: the top
+  // seeds go straight through to the semi-finals.
+  const advancing = (qf: { t1?: Team; t2?: Team }, played?: MatchRecord) => {
+    if (isKnockout && qf.t1 && !qf.t2) return qf.t1;
+    if (isKnockout && !qf.t1 && qf.t2) return qf.t2;
+    return getTeam(getMatchWinner(played));
+  };
 
   const hasQuarterFinals = isKnockout ? koTeams.length > 4 : (groupAStandings.length >= 4 && groupBStandings.length >= 4);
   const hasSemiFinals = isKnockout ? koTeams.length > 2 : (groupAStandings.length >= 2 && groupBStandings.length >= 2);
 
   const quarterFinals = [
-    { id: `${activeCategory}_C1`, title: "Cuartos 1", time: "12:10", t1: isKnockout ? koTeams[0] : groupAStandings[0], t2: isKnockout ? koTeams[7] : groupBStandings[3], label1: isKnockout ? "Sembrado 1" : "1º Gr. A", label2: isKnockout ? "Sembrado 8" : "4º Gr. B" },
-    { id: `${activeCategory}_C2`, title: "Cuartos 2", time: "12:17", t1: isKnockout ? koTeams[3] : groupBStandings[1], t2: isKnockout ? koTeams[4] : groupAStandings[2], label1: isKnockout ? "Sembrado 4" : "2º Gr. B", label2: isKnockout ? "Sembrado 5" : "3º Gr. A" },
-    { id: `${activeCategory}_C3`, title: "Cuartos 3", time: "12:24", t1: isKnockout ? koTeams[1] : groupBStandings[0], t2: isKnockout ? koTeams[6] : groupAStandings[3], label1: isKnockout ? "Sembrado 2" : "1º Gr. B", label2: isKnockout ? "Sembrado 7" : "4º Gr. A" },
-    { id: `${activeCategory}_C4`, title: "Cuartos 4", time: "12:31", t1: isKnockout ? koTeams[2] : groupAStandings[1], t2: isKnockout ? koTeams[5] : groupBStandings[2], label1: isKnockout ? "Sembrado 3" : "2º Gr. A", label2: isKnockout ? "Sembrado 6" : "3º Gr. B" },
+    { id: `${activeCategory}_C1`, title: "Cuartos 1", time: slotTime(0), t1: isKnockout ? koTeams[0] : groupAStandings[0], t2: isKnockout ? koTeams[7] : groupBStandings[3], label1: isKnockout ? "Sembrado 1" : "1º Gr. A", label2: isKnockout ? "Sembrado 8" : "4º Gr. B" },
+    { id: `${activeCategory}_C2`, title: "Cuartos 2", time: slotTime(1), t1: isKnockout ? koTeams[3] : groupBStandings[1], t2: isKnockout ? koTeams[4] : groupAStandings[2], label1: isKnockout ? "Sembrado 4" : "2º Gr. B", label2: isKnockout ? "Sembrado 5" : "3º Gr. A" },
+    { id: `${activeCategory}_C3`, title: "Cuartos 3", time: slotTime(2), t1: isKnockout ? koTeams[1] : groupBStandings[0], t2: isKnockout ? koTeams[6] : groupAStandings[3], label1: isKnockout ? "Sembrado 2" : "1º Gr. B", label2: isKnockout ? "Sembrado 7" : "4º Gr. A" },
+    { id: `${activeCategory}_C4`, title: "Cuartos 4", time: slotTime(3), t1: isKnockout ? koTeams[2] : groupAStandings[1], t2: isKnockout ? koTeams[5] : groupBStandings[2], label1: isKnockout ? "Sembrado 3" : "2º Gr. A", label2: isKnockout ? "Sembrado 6" : "3º Gr. B" },
   ];
 
   const c1Match = findMatch(`${activeCategory}_C1`, quarterFinals[0].t1, quarterFinals[0].t2);
   const c2Match = findMatch(`${activeCategory}_C2`, quarterFinals[1].t1, quarterFinals[1].t2);
   const c3Match = findMatch(`${activeCategory}_C3`, quarterFinals[2].t1, quarterFinals[2].t2);
   const c4Match = findMatch(`${activeCategory}_C4`, quarterFinals[3].t1, quarterFinals[3].t2);
+  const qfSlots = hasQuarterFinals ? 4 : 0;
 
   const semiFinals = [
     { 
-      id: `${activeCategory}_S1`, title: "Semifinal 1", time: "12:45", 
-      t1: hasQuarterFinals ? getTeam(getMatchWinner(c1Match)) : (isKnockout ? koTeams[0] : groupAStandings[0]), 
-      t2: hasQuarterFinals ? getTeam(getMatchWinner(c2Match)) : (isKnockout ? koTeams[3] : groupBStandings[1]), 
+      id: `${activeCategory}_S1`, title: "Semifinal 1", time: slotTime(qfSlots), 
+      t1: hasQuarterFinals ? advancing(quarterFinals[0], c1Match) : (isKnockout ? koTeams[0] : groupAStandings[0]), 
+      t2: hasQuarterFinals ? advancing(quarterFinals[1], c2Match) : (isKnockout ? koTeams[3] : groupBStandings[1]), 
       label1: hasQuarterFinals ? "Ganador C1" : (isKnockout ? "Sembrado 1" : "1º Gr. A"), 
       label2: hasQuarterFinals ? "Ganador C2" : (isKnockout ? "Sembrado 4" : "2º Gr. B") 
     },
     { 
-      id: `${activeCategory}_S2`, title: "Semifinal 2", time: "12:55", 
-      t1: hasQuarterFinals ? getTeam(getMatchWinner(c3Match)) : (isKnockout ? koTeams[1] : groupBStandings[0]), 
-      t2: hasQuarterFinals ? getTeam(getMatchWinner(c4Match)) : (isKnockout ? koTeams[2] : groupAStandings[1]), 
+      id: `${activeCategory}_S2`, title: "Semifinal 2", time: slotTime(qfSlots + 1), 
+      t1: hasQuarterFinals ? advancing(quarterFinals[2], c3Match) : (isKnockout ? koTeams[1] : groupBStandings[0]), 
+      t2: hasQuarterFinals ? advancing(quarterFinals[3], c4Match) : (isKnockout ? koTeams[2] : groupAStandings[1]), 
       label1: hasQuarterFinals ? "Ganador C3" : (isKnockout ? "Sembrado 2" : "1º Gr. B"), 
       label2: hasQuarterFinals ? "Ganador C4" : (isKnockout ? "Sembrado 3" : "2º Gr. A") 
     },
@@ -104,10 +128,11 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
 
   const s1Match = findMatch(`${activeCategory}_S1`, semiFinals[0].t1, semiFinals[0].t2);
   const s2Match = findMatch(`${activeCategory}_S2`, semiFinals[1].t1, semiFinals[1].t2);
+  const sfSlots = qfSlots + (hasSemiFinals ? 2 : 0);
 
   const finals = [
     { 
-      id: `${activeCategory}_F`, title: "GRAN FINAL", time: "13:20", 
+      id: `${activeCategory}_F`, title: "GRAN FINAL", time: slotTime(sfSlots + (hasSemiFinals ? 1 : 0)), 
       t1: hasSemiFinals ? getTeam(getMatchWinner(s1Match)) : (isKnockout ? koTeams[0] : groupAStandings[0]), 
       t2: hasSemiFinals ? getTeam(getMatchWinner(s2Match)) : (isKnockout ? koTeams[1] : groupBStandings[0]), 
       label1: hasSemiFinals ? "Ganador S1" : (isKnockout ? "Sembrado 1" : "1º Gr. A"), 
@@ -116,7 +141,7 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
   ];
   const thirdPlace = [
     { 
-      id: `${activeCategory}_T`, title: "3º y 4º Puesto", time: "13:10", 
+      id: `${activeCategory}_T`, title: "3º y 4º Puesto", time: slotTime(sfSlots), 
       t1: hasSemiFinals ? getTeam(getMatchLoser(s1Match)) : undefined, 
       t2: hasSemiFinals ? getTeam(getMatchLoser(s2Match)) : undefined, 
       label1: hasSemiFinals ? "Perdedor S1" : "", 
@@ -143,7 +168,9 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
 
   const renderMatch = (match: any, isLarge = false) => {
     const playedMatch = findMatch(match.id, match.t1, match.t2);
-    const duration = match.id.startsWith('C') ? 420 : 600;
+    const duration = matchDuration;
+    const isBye = isKnockout && match.id.includes('_C') && (!match.t1 !== !match.t2);
+    const byeText = 'Exento (pasa directo)';
 
     return (
       <motion.div
@@ -166,7 +193,7 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
             <div className="flex flex-col gap-1.5">
               <span className="text-[8px] font-bold text-natural-primary/60 uppercase tracking-[0.2em] ml-1">{match.label1}</span>
               <div className="flex items-center justify-between gap-3">
-                <TeamBadge team={match.t1} onTeamClick={onTeamClick} />
+                <TeamBadge team={match.t1} onTeamClick={onTeamClick} fallback={isBye ? byeText : undefined} />
                 {playedMatch && (
                   <div className="flex flex-col items-end">
                     <span 
@@ -192,7 +219,7 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
             {/* Team 2 */}
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center justify-between gap-3">
-                <TeamBadge team={match.t2} onTeamClick={onTeamClick} />
+                <TeamBadge team={match.t2} onTeamClick={onTeamClick} fallback={isBye ? byeText : undefined} />
                 {playedMatch && (
                   <div className="flex flex-col items-end">
                     <span 
@@ -232,6 +259,8 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
                 {playedMatch && (
                   <button
                     onClick={() => onDeleteMatch(playedMatch.id as string)}
+                    aria-label="Borrar resultado"
+                    title="Borrar resultado"
                     className="w-9 h-9 flex items-center justify-center bg-red-50 hover:bg-red-100 text-red-500 rounded-2xl transition-all border border-red-100"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -307,7 +336,7 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
           <div className="flex flex-col snap-center min-w-[280px]">
             <PhaseInfo 
               title="Cuartos de Final" 
-              duration="7 minutos" 
+              duration={durationText} 
               notes="En caso de empate, tanda de penaltis al fallo." 
             />
             <div className="flex flex-col gap-8 items-center">
@@ -321,7 +350,7 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
           <div className="flex flex-col snap-center min-w-[280px] justify-center">
             <PhaseInfo 
               title="Semifinales" 
-              duration="10 minutos" 
+              duration={durationText} 
               notes="Máxima intensidad. Penaltis al fallo en caso de empate." 
             />
             <div className="flex flex-col gap-32 items-center">
@@ -334,7 +363,7 @@ export const PlayoffsView: React.FC<PlayoffsViewProps> = ({
         <div className="flex flex-col snap-center min-w-[320px] justify-center">
           <PhaseInfo 
             title="Fase Final" 
-            duration="10 minutos" 
+            duration={durationText} 
             notes="¡Suerte a los finalistas! Respeto ante todo." 
           />
           <div className="flex flex-col gap-12 items-center">

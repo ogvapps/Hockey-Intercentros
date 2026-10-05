@@ -1,67 +1,136 @@
 rules_version='2'
 
+// Admin model
+// ───────────
+// • Global admins: the super-admin (verified Google email), any uid listed in
+//   /admins, or anyone holding a valid PIN session for the 'global' scope.
+// • Scope admins: anyone holding a valid PIN session for a tournament id
+//   (or 'legacy' for the root matches/teams/app settings).
+//
+// PINs live in /secrets/{scope}, which the public can never read. A PIN
+// session is /adminSessions/{uid}/scopes/{scope} = { pin }; it can only be
+// written if the pin matches the secret, and it stops being valid as soon as
+// the secret changes (so changing a PIN revokes every old session).
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper: is the super-admin (Google auth)
-    function isSuperAdmin() {
-      return request.auth != null
-        && request.auth.token.email == 'orestesgvillanueva@gmail.com';
+    function isSignedIn() {
+      return request.auth != null;
     }
 
-    // Helper: any authenticated user (Google or anonymous via PIN)
-    function isAuthenticated() {
-      return request.auth != null;
+    function isSuperAdmin() {
+      return isSignedIn()
+        && request.auth.token.get('email', '') == 'orestesgvillanueva@gmail.com'
+        && request.auth.token.get('email_verified', false) == true;
+    }
+
+    function isListedAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function hasPinSession(scope) {
+      let sessionPath = /databases/$(database)/documents/adminSessions/$(request.auth.uid)/scopes/$(scope);
+      let secretPath = /databases/$(database)/documents/secrets/$(scope);
+      return isSignedIn()
+        && exists(sessionPath)
+        && exists(secretPath)
+        && get(sessionPath).data.pin == get(secretPath).data.pin;
+    }
+
+    function isGlobalAdmin() {
+      return isSuperAdmin() || isListedAdmin() || hasPinSession('global');
+    }
+
+    function isScopeAdmin(scope) {
+      return isGlobalAdmin() || hasPinSession(scope);
+    }
+
+    // Settings documents must never carry a PIN again (they are public).
+    function hasNoPublicPin() {
+      return !('adminPin' in request.resource.data);
     }
 
     // ── Tournaments ──
     match /tournaments/{tournamentId} {
       allow read: if true;
-      allow write: if isAuthenticated();
+      allow create: if isGlobalAdmin() && hasNoPublicPin();
+      allow update: if isScopeAdmin(tournamentId) && hasNoPublicPin();
+      allow delete: if isScopeAdmin(tournamentId);
 
       match /matches/{matchId} {
         allow read: if true;
-        allow create, update, delete: if isAuthenticated();
+        allow write: if isScopeAdmin(tournamentId);
       }
 
       match /teams/{teamId} {
         allow read: if true;
-        allow write: if isAuthenticated();
+        allow write: if isScopeAdmin(tournamentId);
       }
     }
 
-    // (Keep legacy matches/teams for backwards compat during migration)
+    // ── Legacy tournament (root collections) ──
     match /matches/{matchId} {
       allow read: if true;
-      allow create, update, delete: if isAuthenticated();
+      allow write: if isScopeAdmin('legacy');
     }
     match /teams/{teamId} {
       allow read: if true;
-      allow write: if isAuthenticated();
+      allow write: if isScopeAdmin('legacy');
     }
-
-    // ── App settings: anyone reads, only super-admin writes ──
-    match /app/{docId} {
+    match /app/settings {
       allow read: if true;
-      allow write: if isSuperAdmin();
+      allow create, update: if isScopeAdmin('legacy') && hasNoPublicPin();
+      allow delete: if isGlobalAdmin();
     }
 
-    // ── Admins collection: only super-admin ──
+    // ── PIN secrets: never public ──
+    match /secrets/{scope} {
+      allow read: if isScopeAdmin(scope);
+      allow create, update: if isScopeAdmin(scope)
+        && request.resource.data.keys().hasOnly(['pin', 'updatedAt'])
+        && request.resource.data.pin is string
+        && request.resource.data.pin.size() >= 4
+        && request.resource.data.pin.size() <= 64;
+      allow delete: if isGlobalAdmin();
+    }
+
+    // ── PIN sessions: a write only succeeds with the right PIN ──
+    // getAfter() lets a PIN change and the matching session update be
+    // committed together in one batch.
+    match /adminSessions/{uid}/scopes/{scope} {
+      allow read, delete: if isSignedIn() && request.auth.uid == uid;
+      allow create, update: if isSignedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['pin', 'createdAt'])
+        && request.resource.data.pin is string
+        && exists(/databases/$(database)/documents/secrets/$(scope))
+        && request.resource.data.pin == getAfter(/databases/$(database)/documents/secrets/$(scope)).data.pin;
+    }
+
+    // ── Admins collection: only super-admin manages it ──
     match /admins/{uid} {
-      allow read: if isAuthenticated();
+      allow read: if isSuperAdmin() || (isSignedIn() && request.auth.uid == uid);
       allow write: if isSuperAdmin();
     }
 
-    // ── Stats / visits: anyone can increment, only super-admin reads ──
+    // ── Stats / visits: anyone can add exactly one visit, only super-admin reads ──
     match /stats/visits {
       allow read: if isSuperAdmin();
-      allow update, create: if true;
+      allow create: if request.resource.data.keys().hasOnly(['total', 'lastUpdate'])
+        && request.resource.data.total == 1
+        && request.resource.data.lastUpdate == request.time;
+      allow update: if request.resource.data.keys().hasOnly(['total', 'lastUpdate'])
+        && request.resource.data.total == resource.data.total + 1
+        && request.resource.data.lastUpdate == request.time;
     }
 
-    // ── Presence: anyone writes their own, only super-admin reads all ──
+    // ── Presence: heartbeat docs with a single server timestamp ──
     match /presence/{sessionId} {
       allow read: if isSuperAdmin();
-      allow write: if true;
+      allow create, update: if sessionId.size() <= 40
+        && request.resource.data.keys().hasOnly(['lastSeen'])
+        && request.resource.data.lastSeen == request.time;
     }
   }
 }

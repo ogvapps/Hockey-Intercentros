@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import { ScheduleMatch, MatchRecord, Category } from '../types';
 import { TeamBadge } from './TeamBadge';
 import { isMatchPlayed, getMatchResult, getMatchId } from '../utils/match';
+import { addMinutes, getSlotMinutes } from '../constants/schedule';
 
 interface ScheduleViewProps {
   schedule: ScheduleMatch[];
@@ -13,6 +14,9 @@ interface ScheduleViewProps {
   onTeamClick: (name: string) => void;
   onStartMatch: (t1: string, t2: string, group: string, id: string) => void;
   onUpdateMatchResult: (matchId: string, s1: number, s2: number) => void;
+  matchDuration?: number;  // seconds
+  restDuration?: number;   // minutes
+  sportId?: string;
   onDeleteMatch: (matchId: string) => void;
   onResumeMatch: (match: MatchRecord) => void;
   requestPrompt: (title: string, defaultValue: string, onConfirm: (val: string) => void, placeholder?: string) => void;
@@ -27,6 +31,9 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
   onTeamClick,
   onStartMatch,
   onUpdateMatchResult,
+  matchDuration,
+  restDuration,
+  sportId,
   onDeleteMatch,
   onResumeMatch,
   requestPrompt,
@@ -51,6 +58,11 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
   const nextMatchId = schedule.find(m => 
     !m.isRestMatch && !isMatchPlayed(matches, activeCategory, m.team1.name, m.team2.name)
   )?.id;
+
+  const matchMins = matchDuration ? Math.floor(matchDuration / 60) : 0;
+  const slotMins = getSlotMinutes({ matchDurationMins: matchMins || undefined, restDurationMins: restDuration });
+  const lastStart = schedule.reduce((latest, m) => (m.time > latest ? m.time : latest), '00:00');
+  const endTime = schedule.length ? addMinutes(lastStart, slotMins) : null;
 
   const rounds = Array.from(new Set(schedule.map(m => m.round))).sort((a: number, b: number) => a - b);
 
@@ -88,9 +100,15 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
       id="schedule-view"
     >
       <div className="bg-natural-sidebar border-l-4 border-natural-primary p-6 rounded-3xl shadow-sm text-sm">
-        <p className="text-natural-dark font-serif text-lg mb-1 italic">Formato Relámpago (Fin 13:30h)</p>
+        <p className="text-natural-dark font-serif text-lg mb-1 italic">
+          Fase de liga{endTime ? ` (fin previsto ${endTime}h)` : ''}
+        </p>
         <p className="text-natural-text">
-          Partidos de liga duran <strong>4 minutos (+1 min de cambio)</strong>.
+          {sportId === 'volleyball' || !matchMins ? (
+            <>Partidos sin reloj{restDuration ? <> (<strong>+{restDuration} min de cambio</strong>)</> : null}.</>
+          ) : (
+            <>Partidos de liga duran <strong>{matchMins} minutos{restDuration ? ` (+${restDuration} min de cambio)` : ''}</strong>.</>
+          )}
         </p>
       </div>
 

@@ -1,23 +1,30 @@
 import React, { useState, useEffect } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { doc, onSnapshot } from 'firebase/firestore';
-import { auth, db, signIn, logOut, signInAsAnonymous } from '../services/firebase';
+import { onSnapshot } from 'firebase/firestore';
+import { auth, signIn, logOut, openPinSession, closePinSessions, secretDoc, GLOBAL_SCOPE } from '../services/firebase';
 import { toast } from 'react-hot-toast';
 
-const ADMIN_PIN_FALLBACK = "I2026";
-
-export function useAuth(dynamicPin?: string) {
+/**
+ * Admin status is decided by the Firestore rules, not by the client: the
+ * scope's secret document can only be read by its admins, so a successful
+ * listener on it means "admin" and a permission error means "not admin".
+ *
+ * @param scope tournament id, 'legacy', or omitted for the global (home) scope
+ */
+export function useAuth(scope: string = GLOBAL_SCOPE) {
   const [user, setUser] = useState<User | null>(null);
   const [isAdminUser, setIsAdminUser] = useState(false);
-  const [pinUnlocked, setPinUnlocked] = useState(
-    () => localStorage.getItem('admin_pin_session') === 'true'
-  );
+  const [isGlobalAdmin, setIsGlobalAdmin] = useState(false);
   const [showPinModal, setShowPinModal] = useState(false);
   const [pinInput, setPinInput] = useState('');
+  const [pinSubmitting, setPinSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Bumped after a PIN session is opened so the listeners re-check access.
+  const [sessionVersion, setSessionVersion] = useState(0);
 
-  // Sync Auth state
   useEffect(() => {
+    // Clean up the old client-side unlock flag, which is no longer trusted.
+    try { localStorage.removeItem('admin_pin_session'); } catch {}
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setLoading(false);
@@ -25,71 +32,77 @@ export function useAuth(dynamicPin?: string) {
     return unsub;
   }, []);
 
-  // If PIN is unlocked and no auth session yet, sign in anonymously
-  // so Firestore writes are authorized
   useEffect(() => {
-    if (pinUnlocked && !auth.currentUser) {
-      signInAsAnonymous().catch(console.error);
-    }
-  }, [pinUnlocked]);
-
-  // Determine admin status
-  useEffect(() => {
-    // PIN unlock always grants admin
-    if (pinUnlocked) {
-      setIsAdminUser(true);
+    if (!user) {
+      setIsAdminUser(false);
+      setIsGlobalAdmin(false);
       return;
     }
 
-    if (user && !user.isAnonymous) {
-      // Google-signed-in: check admins collection
-      const adminDocRef = doc(db, 'admins', user.uid);
-      const unsub = onSnapshot(adminDocRef, (snap) => {
-        setIsAdminUser(snap.exists() || user.email === 'orestesgvillanueva@gmail.com');
-      }, () => {
-        // fallback to email check on permission error
-        setIsAdminUser(user.email === 'orestesgvillanueva@gmail.com');
-      });
-      return unsub;
-    } else {
-      setIsAdminUser(false);
-    }
-  }, [user, pinUnlocked]);
+    const watch = (s: string, set: (v: boolean) => void) =>
+      onSnapshot(secretDoc(s), () => set(true), () => set(false));
 
-  const handlePinSubmit = (e?: React.FormEvent) => {
+    const unsubScope = watch(scope, setIsAdminUser);
+    const unsubGlobal = scope === GLOBAL_SCOPE ? () => {} : watch(GLOBAL_SCOPE, setIsGlobalAdmin);
+    return () => {
+      unsubScope();
+      unsubGlobal();
+    };
+  }, [user, scope, sessionVersion]);
+
+  // On the home page the scope *is* global.
+  const effectiveGlobalAdmin = scope === GLOBAL_SCOPE ? isAdminUser : isGlobalAdmin;
+
+  const handlePinSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    const effectivePin = dynamicPin || ADMIN_PIN_FALLBACK;
-    if (pinInput.trim() === effectivePin) {
-      setPinUnlocked(true);
-      localStorage.setItem('admin_pin_session', 'true');
-      setShowPinModal(false);
+    const pin = pinInput.trim();
+    if (!pin || pinSubmitting) return;
+    setPinSubmitting(true);
+    try {
+      let ok = await openPinSession(scope, pin);
+      if (!ok && scope !== GLOBAL_SCOPE) ok = await openPinSession(GLOBAL_SCOPE, pin);
+      if (ok) {
+        setShowPinModal(false);
+        setSessionVersion(v => v + 1);
+        toast.success('Acceso concedido');
+      } else {
+        toast.error('PIN incorrecto');
+      }
+    } catch (err) {
+      console.error('PIN error', err);
+      toast.error('No se pudo comprobar el PIN. ¿Hay conexión?');
+    } finally {
       setPinInput('');
-      // Sign in anonymously immediately so writes work right away
-      signInAsAnonymous().catch(console.error);
-    } else {
-      toast.error("PIN Incorrecto");
-      setPinInput('');
+      setPinSubmitting(false);
     }
   };
 
-  const handleSignIn = () => signIn();
+  const handleSignIn = async () => {
+    try {
+      await signIn();
+      setShowPinModal(false);
+    } catch {
+      toast.error('No se pudo iniciar sesión con Google');
+    }
+  };
 
   const handleLogOut = async () => {
+    await closePinSessions(scope === GLOBAL_SCOPE ? [GLOBAL_SCOPE] : [scope, GLOBAL_SCOPE]);
     await logOut();
-    setPinUnlocked(false);
     setIsAdminUser(false);
-    localStorage.removeItem('admin_pin_session');
+    setIsGlobalAdmin(false);
   };
 
   return {
     user,
     isAdminUser,
-    pinUnlocked,
+    isGlobalAdmin: effectiveGlobalAdmin,
     loading,
     showPinModal,
     setShowPinModal,
     pinInput,
     setPinInput,
+    pinSubmitting,
     handlePinSubmit,
     handleSignIn,
     handleLogOut,

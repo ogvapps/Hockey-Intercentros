@@ -34,6 +34,17 @@ const generateRoundRobin = (teams: Team[]): [number, number][][] => {
   return rounds;
 };
 
+/** Minutes from the start of one match to the next on the same court. */
+export const getSlotMinutes = (options: Pick<ScheduleOptions, 'matchDurationMins' | 'restDurationMins'>) =>
+  (options.matchDurationMins || 5) + (options.restDurationMins || 0);
+
+/** Adds minutes to an "HH:MM" string. */
+export const addMinutes = (time: string, minutes: number) => {
+  const [h, m] = time.split(':').map(Number);
+  const total = (h || 0) * 60 + (m || 0) + minutes;
+  return `${(Math.floor(total / 60) % 24).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`;
+};
+
 export interface ScheduleOptions {
   format?: string; // 'group-playoff' | 'league' | 'knockout'
   startTime?: string;
@@ -51,8 +62,10 @@ export const buildSchedule = (
   
   // Default values for legacy compatibility
   const format = options.format || 'group-playoff';
+  // A knockout tournament has no league phase: everything happens in the bracket.
+  if (format === 'knockout') return schedule;
   const startTime = options.startTime || '09:30';
-  const duration = (options.matchDurationMins || 5) + (options.restDurationMins || 0);
+  const duration = getSlotMinutes(options);
   const courts = options.concurrentCourts || 2;
 
   // Helper to get formatted time
