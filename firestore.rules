@@ -104,7 +104,7 @@ service cloud.firestore {
       allow create, update: if isSignedIn() && request.auth.uid == uid
         && request.resource.data.keys().hasOnly(['pin', 'createdAt'])
         && request.resource.data.pin is string
-        && exists(/databases/$(database)/documents/secrets/$(scope))
+        && existsAfter(/databases/$(database)/documents/secrets/$(scope))
         && request.resource.data.pin == getAfter(/databases/$(database)/documents/secrets/$(scope)).data.pin;
     }
 

@@ -79,6 +79,18 @@ await t('global admin writes legacy', assertSucceeds(anonG.doc('matches/m1').set
 await t('global admin cannot add itself to admins', assertFails(anonG.doc('admins/anonG').set({ email: 'x' })));
 
 console.log('Super-admin and migration');
+const firstPin = superA.batch();
+firstPin.set(superA.doc('secrets/brandnew'), { pin: 'FIRST12', updatedAt: FV.serverTimestamp() });
+firstPin.set(superA.doc('adminSessions/super/scopes/brandnew'), { pin: 'FIRST12', createdAt: FV.serverTimestamp() });
+await t('super-admin creates a first PIN + own session in one batch', assertSucceeds(firstPin.commit()));
+const firstGlobal = superA.batch();
+firstGlobal.set(superA.doc('secrets/global'), { pin: 'GLOBAL2', updatedAt: FV.serverTimestamp() });
+firstGlobal.set(superA.doc('adminSessions/super/scopes/global'), { pin: 'GLOBAL2', createdAt: FV.serverTimestamp() });
+await t('super-admin sets the global PIN + own session', assertSucceeds(firstGlobal.commit()));
+const sneaky = anonB.batch();
+sneaky.set(anonB.doc('secrets/other'), { pin: 'HACK123' });
+sneaky.set(anonB.doc('adminSessions/anonB/scopes/other'), { pin: 'HACK123' });
+await t('non-admin cannot create a PIN for itself', assertFails(sneaky.commit()));
 await t('super-admin removes public PIN from settings', assertSucceeds(superA.doc('app/settings').update({ adminPin: FV.delete() })));
 await t('super-admin cannot put it back', assertFails(superA.doc('app/settings').update({ adminPin: 'x' })));
 await t('super-admin reads visits', assertSucceeds(superA.doc('stats/visits').get()));
