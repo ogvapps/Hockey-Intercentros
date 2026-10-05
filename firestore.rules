@@ -1,87 +1,67 @@
-rules_version = '2';
+rules_version='2'
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if false;
+
+    // Helper: is the super-admin (Google auth)
+    function isSuperAdmin() {
+      return request.auth != null
+        && request.auth.token.email == 'orestesgvillanueva@gmail.com';
     }
 
-    function isSignedIn() {
+    // Helper: any authenticated user (Google or anonymous via PIN)
+    function isAuthenticated() {
       return request.auth != null;
     }
 
-    function isSuperAdmin() {
-      return isSignedIn() && request.auth.token.email == 'orestesgv@gmail.com' && request.auth.token.email_verified == true;
-    }
-
-    function isAdmin() {
-      return isSuperAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
-    }
-
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
-    }
-
-    function incoming() {
-      return request.resource.data;
-    }
-
-    // 1. Settings Rules
-    match /app/settings {
+    // ── Tournaments ──
+    match /tournaments/{tournamentId} {
       allow read: if true;
-      allow write: if isAdmin() && isValidSettings(incoming());
+      allow write: if isAuthenticated();
+
+      match /matches/{matchId} {
+        allow read: if true;
+        allow create, update, delete: if isAuthenticated();
+      }
+
+      match /teams/{teamId} {
+        allow read: if true;
+        allow write: if isAuthenticated();
+      }
     }
 
-    function isValidSettings(data) {
-      return data.keys().hasAll(['title']) && 
-             data.keys().size() <= 4 &&
-             data.title is string && data.title.size() <= 100 &&
-             (!data.keys().contains('description') || (data.description is string && data.description.size() <= 500));
-    }
-
-    // 2. Teams Rules
-    match /teams/{teamId} {
-      allow read: if true;
-      allow create: if isAdmin() && isValidId(teamId) && isValidTeam(incoming());
-      allow update: if isAdmin() && isValidTeam(incoming());
-      allow delete: if isAdmin();
-    }
-
-    function isValidTeam(data) {
-      return data.keys().hasAll(['name', 'color', 'group', 'category']) &&
-             data.name is string && data.name.size() <= 60 &&
-             data.color is string && data.color.size() <= 20 &&
-             data.group in ['A', 'B'] &&
-             data.category in ['masculino', 'femenino'] &&
-             (!data.keys().contains('isRest') || data.isRest is bool);
-    }
-
-    // 3. Matches Rules
+    // (Keep legacy matches/teams for backwards compat during migration)
     match /matches/{matchId} {
       allow read: if true;
-      allow create: if isAdmin() && isValidId(matchId) && isValidMatch(incoming());
-      allow update: if isAdmin() && isValidMatch(incoming());
-      allow delete: if isAdmin();
+      allow create, update, delete: if isAuthenticated();
+    }
+    match /teams/{teamId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
     }
 
-    function isValidMatch(data) {
-      return data.keys().hasAll(['team1', 'team2', 'category', 'time', 'round', 'group']) &&
-             data.team1 is string && data.team1.size() <= 60 &&
-             data.team2 is string && data.team2.size() <= 60 &&
-             data.category in ['masculino', 'femenino'] &&
-             data.time is string && data.time.size() <= 10 &&
-             data.round is int &&
-             data.group in ['A', 'B'] &&
-             (!data.keys().contains('score1') || data.score1 is int) &&
-             (!data.keys().contains('score2') || data.score2 is int) &&
-             (!data.keys().contains('played') || data.played is bool) &&
-             (!data.keys().contains('updatedAt') || data.updatedAt is timestamp);
-    }
-
-    // 4. Admin whitelist
-    match /admins/{userId} {
-      allow get: if isSignedIn() && request.auth.uid == userId;
+    // ── App settings: anyone reads, only super-admin writes ──
+    match /app/{docId} {
+      allow read: if true;
       allow write: if isSuperAdmin();
-      allow list: if isAdmin();
+    }
+
+    // ── Admins collection: only super-admin ──
+    match /admins/{uid} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    // ── Stats / visits: anyone can increment, only super-admin reads ──
+    match /stats/visits {
+      allow read: if isSuperAdmin();
+      allow update, create: if true;
+    }
+
+    // ── Presence: anyone writes their own, only super-admin reads all ──
+    match /presence/{sessionId} {
+      allow read: if isSuperAdmin();
+      allow write: if true;
     }
   }
 }

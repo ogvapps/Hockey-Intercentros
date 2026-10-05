@@ -1,10 +1,9 @@
 {
-  "projectId": "shortsgen-ai",
-  "appId": "1:1043588917081:web:f96cbe836cf6edd1f38e48",
-  "apiKey": "AIzaSyD396B7h4Vbkj0_Tgwrk5R1E84KhbtUdiU",
-  "authDomain": "shortsgen-ai.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-2d00431c-c83f-4e7c-919d-a0f150e3fdfc",
-  "storageBucket": "shortsgen-ai.firebasestorage.app",
-  "messagingSenderId": "1043588917081",
+  "projectId": "hockey-intercentros-2026",
+  "appId": "1:25542047386:web:a204f86857645a92911123",
+  "apiKey": "AIzaSyDH13MTVDi7x5Re5hb33sp0ViMP6LOuztA",
+  "authDomain": "hockey-intercentros-2026.firebaseapp.com",
+  "storageBucket": "hockey-intercentros-2026.firebasestorage.app",
+  "messagingSenderId": "25542047386",
   "measurementId": ""
 }
