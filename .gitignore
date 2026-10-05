@@ -11,3 +11,6 @@ coverage/
 .firebase/
 .claude/
 scratch/
+.vercel/
+
+.vercel
